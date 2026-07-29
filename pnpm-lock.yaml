@@ -71,6 +71,9 @@ importers:
 
   packages/runner:
     dependencies:
+      '@codeatlas/analyzer':
+        specifier: workspace:*
+        version: link:../analyzer
       execa:
         specifier: 9.6.0
         version: 9.6.0

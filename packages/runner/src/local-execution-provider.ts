@@ -1,11 +1,13 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   access,
   chmod,
   copyFile,
+  cp,
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   realpath,
@@ -14,7 +16,13 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { accessSync, constants as fsConstants, realpathSync } from "node:fs";
+import {
+  accessSync,
+  constants as fsConstants,
+  lstatSync,
+  realpathSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import {
   delimiter,
   dirname,
@@ -24,62 +32,104 @@ import {
   resolve,
   sep,
 } from "node:path";
-import { tmpdir } from "node:os";
+import { computeSnapshotDigest } from "@codeatlas/analyzer";
 import { execa } from "execa";
 import type {
   ExecutionProvider,
   ExecutionRequest,
   ExecutionResult,
 } from "./execution-provider.js";
-import { parseVitestResult } from "./vitest-result.js";
+import {
+  parseVitestResult,
+  unexecutedGeneratedTests,
+} from "./vitest-result.js";
 
 const RUNNER_VERSION = "0.1.0";
 const EXCLUDED_COPY_NAMES = new Set(["node_modules", "coverage", ".git"]);
-const SECRET_NAME =
-  /(?:api[_-]?key|authorization|cookie|credential|passwd|password|private[_-]?key|secret|session|token)/iu;
+const SECRET_NAME_SOURCE =
+  "api[_-]?key|authorization|cookie|credential|passwd|password|private[_-]?key|secret|session|token";
+const SECRET_LABEL_SOURCE = `(?:${SECRET_NAME_SOURCE}|[A-Za-z_][A-Za-z0-9_-]*(?:${SECRET_NAME_SOURCE})[A-Za-z0-9_-]*)`;
 
 export interface LocalExecutionProviderOptions {
   workspaceRoot?: string;
+  nodePath?: string;
+  pnpmCliPath?: string;
+  /** @deprecated Use pnpmCliPath. This path must still be a JavaScript CLI, never a shim. */
   pnpmPath?: string;
   temporaryParent?: string;
 }
 
+interface RuntimeIdentity {
+  nodeVersion: string;
+  pnpmVersion: string;
+  environmentDigest: string;
+}
+
 export class LocalExecutionProvider implements ExecutionProvider {
   readonly #workspaceRoot: string;
-  readonly #pnpmPath: string;
+  readonly #nodePath: string;
+  readonly #pnpmCliPath: string;
   readonly #temporaryParent: string;
 
   constructor(options: LocalExecutionProviderOptions = {}) {
     this.#workspaceRoot = resolve(options.workspaceRoot ?? process.cwd());
-    this.#pnpmPath = resolvePnpmPath(options.pnpmPath);
+    this.#nodePath = resolveNodePath(options.nodePath);
+    this.#pnpmCliPath = resolvePnpmCliPath(
+      options.pnpmCliPath ?? options.pnpmPath,
+    );
     this.#temporaryParent = resolve(options.temporaryParent ?? tmpdir());
   }
 
   async run(request: ExecutionRequest): Promise<ExecutionResult> {
     validatePolicy(request.policy);
-    const workspaceRoot = await realpath(this.#workspaceRoot);
-    const snapshotRoot = await resolveSnapshotRoot(
-      request.snapshotRoot,
-      workspaceRoot,
-    );
     const testPaths = request.testPaths.map((path) =>
       validateRelativePath(path, "test path"),
     );
     const generatedPaths = request.generatedFiles.map((file) =>
       validateRelativePath(file.path, "generated path"),
     );
-    rejectDuplicates(testPaths, "test paths");
-    rejectDuplicates(generatedPaths, "generated paths");
-    await access(this.#pnpmPath, fsConstants.X_OK);
+    const requestedTestPaths = [...testPaths, ...generatedPaths];
+    if (requestedTestPaths.length === 0) {
+      throw new InputValidationError(
+        "At least one selected or generated test is required",
+      );
+    }
+    rejectDuplicates(requestedTestPaths, "requested test paths");
 
+    const workspaceRoot = await realpath(this.#workspaceRoot);
+    const snapshotRoot = await resolveSnapshotRoot(request.snapshotRoot);
+    const suppliedDigest = await computeSnapshotDigest(snapshotRoot);
+    if (suppliedDigest !== request.snapshotSha) {
+      throw new InputValidationError(
+        "Snapshot digest does not match snapshotSha",
+      );
+    }
+    await validateSelectedTests(snapshotRoot, testPaths);
+    await access(this.#nodePath, fsConstants.X_OK);
+    await access(this.#pnpmCliPath, fsConstants.R_OK);
+
+    const runtime = await resolveRuntimeIdentity(
+      workspaceRoot,
+      this.#nodePath,
+      this.#pnpmCliPath,
+    );
     const startedAt = performance.now();
-    let temporaryRoot: string | null = null;
+    let attemptRoot: string | null = null;
+    let snapshotCopy: string | null = null;
+    let controlRoot: string | null = null;
     let childPid: number | undefined;
+    let stdout = "";
+    let stderr = "";
+
     try {
       await mkdir(this.#temporaryParent, { recursive: true });
-      temporaryRoot = await realpath(
+      attemptRoot = await realpath(
         await mkdtemp(join(this.#temporaryParent, "codeatlas-run-")),
       );
+      snapshotCopy = join(attemptRoot, "snapshot");
+      controlRoot = await mkdtemp(join(attemptRoot, "control-"));
+      await mkdir(snapshotCopy);
+
       const availableSnapshotFiles =
         request.policy.maxFiles - request.generatedFiles.length;
       if (availableSnapshotFiles < 0) {
@@ -87,27 +137,41 @@ export class LocalExecutionProvider implements ExecutionProvider {
           "Snapshot exceeds the configured file limit",
         );
       }
-      await copySnapshot(snapshotRoot, temporaryRoot, availableSnapshotFiles);
-      await validateSelectedTests(snapshotRoot, testPaths);
+      await copySnapshot(snapshotRoot, snapshotCopy, availableSnapshotFiles);
+      const copiedDigest = await computeSnapshotDigest(snapshotCopy);
+      if (copiedDigest !== request.snapshotSha) {
+        throw new InputValidationError(
+          "Copied snapshot digest does not match snapshotSha",
+        );
+      }
+      const allowedCoverage = await buildAllowedCoverageMap(snapshotCopy);
       await writeGeneratedFiles(
-        temporaryRoot,
+        snapshotCopy,
         request.generatedFiles,
         generatedPaths,
       );
+      await cloneWorkspaceDependencies(workspaceRoot, snapshotCopy);
 
-      await createDependencyBridge(workspaceRoot, temporaryRoot);
-
-      const temporaryCache = join(temporaryRoot, ".cache");
-      await mkdir(temporaryCache, { recursive: true });
-      const resultPath = join(temporaryRoot, ".codeatlas-vitest-result.json");
+      const temporaryCache = join(controlRoot, "cache");
+      await mkdir(temporaryCache);
+      await writeFile(
+        join(controlRoot, "package.json"),
+        '{"name":"codeatlas-run-control","private":true}',
+        { mode: 0o600 },
+      );
+      const resultPath = join(
+        controlRoot,
+        `vitest-result-${randomUUID()}.json`,
+      );
       const outputState = { bytes: 0, exceeded: false };
       const outputTransform = () => ({
         binary: true as const,
         transform: function* (
           chunk: unknown,
         ): Generator<Uint8Array, void, void> {
-          if (!(chunk instanceof Uint8Array))
+          if (!(chunk instanceof Uint8Array)) {
             throw new Error("Unexpected subprocess output type");
+          }
           if (
             outputState.bytes + chunk.byteLength >
             request.policy.maxOutputBytes
@@ -119,23 +183,37 @@ export class LocalExecutionProvider implements ExecutionProvider {
           yield chunk;
         },
       });
-
+      const childEnvironment = {
+        PATH: process.env.PATH ?? "",
+        NODE_ENV: "test",
+        CI: "1",
+        NPM_CONFIG_CACHE: temporaryCache,
+        XDG_CACHE_HOME: temporaryCache,
+      };
+      const vitestCliPath = join(
+        snapshotCopy,
+        "node_modules",
+        "vitest",
+        "vitest.mjs",
+      );
       const subprocess = execa(
-        this.#pnpmPath,
+        this.#nodePath,
         [
+          this.#pnpmCliPath,
           "exec",
-          "vitest",
+          this.#nodePath,
+          vitestCliPath,
           "run",
-          ...testPaths,
-          ...generatedPaths,
+          `--root=${snapshotCopy}`,
           "--reporter=json",
           `--outputFile=${resultPath}`,
           "--coverage.enabled",
           "--coverage.provider=v8",
           "--coverage.reporter=json",
+          ...requestedTestPaths,
         ],
         {
-          cwd: temporaryRoot,
+          cwd: controlRoot,
           timeout: request.policy.timeoutMs,
           maxBuffer: request.policy.maxOutputBytes,
           reject: false,
@@ -146,180 +224,149 @@ export class LocalExecutionProvider implements ExecutionProvider {
           encoding: "buffer",
           stdout: outputTransform(),
           stderr: outputTransform(),
-          env: {
-            PATH: process.env.PATH ?? "",
-            NODE_ENV: "test",
-            CI: "1",
-            NPM_CONFIG_CACHE: temporaryCache,
-            XDG_CACHE_HOME: temporaryCache,
-          },
+          env: childEnvironment,
         },
       );
       childPid = subprocess.pid;
+      const launched = childPid !== undefined;
       const execution = await subprocess;
-      if (execution.timedOut || execution.isMaxBuffer || outputState.exceeded) {
-        await terminateProcessTree(childPid);
-      } else {
-        childPid = undefined;
-      }
+      await terminateProcessTree(childPid);
 
-      const boundedOutput = capOutput(
-        sanitizeOutput(toUtf8(execution.stdout), workspaceRoot, temporaryRoot),
-        sanitizeOutput(toUtf8(execution.stderr), workspaceRoot, temporaryRoot),
+      const knownPaths = [
+        workspaceRoot,
+        snapshotRoot,
+        attemptRoot,
+        snapshotCopy,
+        controlRoot,
+        this.#nodePath,
+        this.#pnpmCliPath,
+      ];
+      ({ stdout, stderr } = capOutput(
+        sanitizeOutput(toUtf8(execution.stdout), knownPaths),
+        sanitizeOutput(toUtf8(execution.stderr), knownPaths),
         request.policy.maxOutputBytes,
-      );
-      const { stdout, stderr } = boundedOutput;
+      ));
       const terminalState = execution.timedOut
         ? "TIMED_OUT"
         : outputState.exceeded || execution.isMaxBuffer
           ? "OUTPUT_LIMIT"
           : undefined;
-
       if (terminalState !== undefined) {
-        return await buildResult(request, {
+        return buildResult(request, runtime, startedAt, {
           terminalState,
           exitCode: execution.exitCode ?? null,
-          durationMs: performance.now() - startedAt,
           stdout,
           stderr,
-          environmentDigest: await environmentDigest(workspaceRoot),
-          parsed: null,
+        });
+      }
+
+      if (!launched || (execution.exitCode !== 0 && execution.exitCode !== 1)) {
+        return buildResult(request, runtime, startedAt, {
+          terminalState: "FAILED",
+          exitCode: execution.exitCode ?? null,
+          stdout,
+          stderr,
         });
       }
 
       const remainingBytes = request.policy.maxOutputBytes - outputState.bytes;
-      const resultJson = await readBoundedFile(resultPath, remainingBytes);
-      if (resultJson === null) {
-        await terminateProcessTree(childPid);
-        return await buildResult(request, {
-          terminalState: "OUTPUT_LIMIT",
-          exitCode: execution.exitCode ?? null,
-          durationMs: performance.now() - startedAt,
+      const resultFile = await readFreshRegularFile(resultPath, remainingBytes);
+      if (resultFile.kind !== "ok") {
+        return buildResult(request, runtime, startedAt, {
+          terminalState:
+            resultFile.kind === "output-limit" ? "OUTPUT_LIMIT" : "FAILED",
+          exitCode: execution.exitCode,
           stdout,
           stderr,
-          environmentDigest: await environmentDigest(workspaceRoot),
-          parsed: null,
         });
       }
 
-      const parsed = parseVitestResult(resultJson, {
-        temporaryRoot,
+      const parsed = parseVitestResult(resultFile.content, {
+        snapshotRoot: snapshotCopy,
+        requestedTestPaths,
         generatedFiles: request.generatedFiles,
+        allowedCoverage,
       });
-      const sanitizedParsed = sanitizeParsedFailures(
-        parsed,
-        workspaceRoot,
-        temporaryRoot,
-      );
-      return await buildResult(request, {
+      const sanitizedParsed = sanitizeParsedResult(parsed, knownPaths);
+      return buildResult(request, runtime, startedAt, {
         terminalState: parsed.valid ? "COMPLETED" : "FAILED",
-        exitCode: execution.exitCode ?? null,
-        durationMs: performance.now() - startedAt,
+        exitCode: execution.exitCode,
         stdout,
         stderr,
-        environmentDigest: await environmentDigest(workspaceRoot),
         parsed: sanitizedParsed,
       });
     } catch (error) {
       if (error instanceof InputValidationError) throw error;
-      return await buildResult(request, {
+      const knownPaths = [
+        workspaceRoot,
+        snapshotRoot,
+        attemptRoot,
+        snapshotCopy,
+        controlRoot,
+        this.#nodePath,
+        this.#pnpmCliPath,
+      ];
+      return buildResult(request, runtime, startedAt, {
         terminalState: "FAILED",
         exitCode: null,
-        durationMs: performance.now() - startedAt,
-        stdout: "",
+        stdout,
         stderr: sanitizeOutput(
           error instanceof Error ? error.message : "Execution failed",
-          this.#workspaceRoot,
-          temporaryRoot,
+          knownPaths,
         ),
-        environmentDigest: await environmentDigest(this.#workspaceRoot).catch(
-          () => "unavailable",
-        ),
-        parsed: null,
       });
     } finally {
       await terminateProcessTree(childPid);
-      if (temporaryRoot !== null) {
-        await rm(temporaryRoot, { recursive: true, force: true });
+      if (attemptRoot !== null) {
+        await rm(attemptRoot, { recursive: true, force: true });
       }
     }
   }
 }
 
-async function createDependencyBridge(
-  workspaceRoot: string,
-  temporaryRoot: string,
-): Promise<void> {
-  const nodeModules = join(temporaryRoot, "node_modules");
-  await mkdir(join(nodeModules, ".bin"), { recursive: true });
-  await mkdir(join(nodeModules, "@vitest"), { recursive: true });
-
-  const links = [
-    {
-      source: join(workspaceRoot, "node_modules", "vitest", "vitest.mjs"),
-      destination: join(nodeModules, ".bin", "vitest"),
-      type: "file" as const,
-    },
-    {
-      source: join(workspaceRoot, "node_modules", "vitest"),
-      destination: join(nodeModules, "vitest"),
-      type: "junction" as const,
-    },
-    {
-      source: join(workspaceRoot, "node_modules", "@vitest", "coverage-v8"),
-      destination: join(nodeModules, "@vitest", "coverage-v8"),
-      type: "junction" as const,
-    },
-  ];
-  for (const link of links) {
-    const target = await realpath(link.source);
-    ensureContained(workspaceRoot, target, "workspace dependency path");
-    await symlink(target, link.destination, link.type);
-  }
-}
-
-interface BuildResultOptions {
+interface BuildResultValues {
   terminalState: ExecutionResult["terminalState"];
   exitCode: number | null;
-  durationMs: number;
   stdout: string;
   stderr: string;
-  environmentDigest: string;
-  parsed: ReturnType<typeof parseVitestResult> | null;
+  parsed?: ReturnType<typeof parseVitestResult>;
 }
 
-async function buildResult(
+function buildResult(
   request: ExecutionRequest,
-  options: BuildResultOptions,
-): Promise<ExecutionResult> {
+  runtime: RuntimeIdentity,
+  startedAt: number,
+  values: BuildResultValues,
+): ExecutionResult {
   return {
     revision: request.revision,
     snapshotSha: request.snapshotSha,
-    terminalState: options.terminalState,
-    exitCode: options.exitCode,
-    durationMs: Math.max(0, Math.round(options.durationMs)),
-    testCases: options.parsed?.testCases ?? [],
-    coverage: options.parsed?.coverage ?? [],
-    observations: options.parsed?.observations ?? [],
-    stdout: options.stdout,
-    stderr: options.stderr,
-    environmentDigest: options.environmentDigest,
+    terminalState: values.terminalState,
+    exitCode: values.exitCode,
+    durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+    testCases:
+      values.parsed?.testCases ??
+      unexecutedGeneratedTests(request.generatedFiles),
+    coverage: values.parsed?.coverage ?? [],
+    observations: values.parsed?.observations ?? [],
+    stdout: values.stdout,
+    stderr: values.stderr,
+    environmentDigest: runtime.environmentDigest,
   };
 }
 
-async function resolveSnapshotRoot(
-  candidate: string,
-  workspaceRoot: string,
-): Promise<string> {
-  if (candidate.includes("\0"))
+async function resolveSnapshotRoot(candidate: string): Promise<string> {
+  if (candidate.includes("\0")) {
     throw new InputValidationError("Snapshot root contains NUL");
-  if (!isAbsolute(candidate))
+  }
+  if (!isAbsolute(candidate)) {
     throw new InputValidationError("Snapshot root must be absolute");
+  }
   const resolved = await realpath(candidate);
-  ensureContained(workspaceRoot, resolved, "snapshot root");
   const info = await stat(resolved);
-  if (!info.isDirectory())
+  if (!info.isDirectory()) {
     throw new InputValidationError("Snapshot root must be a directory");
+  }
   return resolved;
 }
 
@@ -335,15 +382,21 @@ function validateRelativePath(candidate: string, label: string): string {
   }
   const portable = candidate.replaceAll("\\", "/");
   const segments = portable.split("/");
-  if (
-    segments.some((segment) => segment === "..") ||
-    segments.some((segment) => segment === "")
-  ) {
+  if (segments.some((segment) => segment === ".." || segment === "")) {
     throw new InputValidationError(`${label} contains traversal`);
   }
+  if (
+    portable.startsWith("-") ||
+    segments.some((segment) => segment.startsWith("-"))
+  ) {
+    throw new InputValidationError(
+      `${label} contains an option-shaped segment`,
+    );
+  }
   const normalized = segments.filter((segment) => segment !== ".").join("/");
-  if (normalized.length === 0)
+  if (normalized.length === 0) {
     throw new InputValidationError(`${label} is empty`);
+  }
   return normalized;
 }
 
@@ -367,8 +420,9 @@ async function copySnapshot(
       const destinationPath = join(destination, entry.name);
       ensureContained(sourceRoot, sourcePath, "snapshot entry");
       const info = await lstat(sourcePath);
-      if (info.isSymbolicLink())
+      if (info.isSymbolicLink()) {
         throw new InputValidationError("Snapshot contains a symbolic link");
+      }
       if (info.isDirectory()) {
         await mkdir(destinationPath);
         await visit(sourcePath, destinationPath, false);
@@ -378,7 +432,11 @@ async function copySnapshot(
             "Snapshot exceeds the configured file limit",
           );
         }
-        await copyFile(sourcePath, destinationPath, fsConstants.COPYFILE_EXCL);
+        await copyFile(
+          sourcePath,
+          destinationPath,
+          fsConstants.COPYFILE_EXCL | fsConstants.COPYFILE_FICLONE,
+        );
         await chmod(destinationPath, info.mode & 0o777);
         files += 1;
       } else {
@@ -391,6 +449,32 @@ async function copySnapshot(
   await visit(sourceRoot, destinationRoot, true);
 }
 
+async function buildAllowedCoverageMap(
+  snapshotRoot: string,
+): Promise<Map<string, number>> {
+  const allowed = new Map<string, number>();
+  async function visit(directory: string): Promise<void> {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      const info = await lstat(path);
+      if (info.isSymbolicLink()) {
+        throw new InputValidationError(
+          "Copied snapshot contains a symbolic link",
+        );
+      }
+      if (info.isDirectory()) {
+        await visit(path);
+      } else if (info.isFile()) {
+        const repositoryPath = toRepositoryPath(snapshotRoot, path);
+        const content = await readFile(path, "utf8");
+        allowed.set(repositoryPath, content.split(/\r\n|\r|\n/u).length);
+      }
+    }
+  }
+  await visit(snapshotRoot);
+  return allowed;
+}
+
 async function validateSelectedTests(
   snapshotRoot: string,
   testPaths: string[],
@@ -401,8 +485,9 @@ async function validateSelectedTests(
     const resolved = await realpath(candidate);
     ensureContained(snapshotRoot, resolved, "test path");
     const info = await stat(resolved);
-    if (!info.isFile())
+    if (!info.isFile()) {
       throw new InputValidationError("Selected test is not a file");
+    }
   }
 }
 
@@ -413,8 +498,9 @@ async function writeGeneratedFiles(
 ): Promise<void> {
   for (const [index, file] of files.entries()) {
     const normalizedPath = normalizedPaths[index];
-    if (normalizedPath === undefined)
+    if (normalizedPath === undefined) {
       throw new InputValidationError("Generated path is missing");
+    }
     const destination = resolve(temporaryRoot, normalizedPath);
     ensureContained(temporaryRoot, destination, "generated path");
     try {
@@ -437,116 +523,315 @@ async function writeGeneratedFiles(
   }
 }
 
-function validatePolicy(policy: ExecutionRequest["policy"]): void {
-  for (const [name, value] of Object.entries(policy)) {
-    if (!Number.isSafeInteger(value) || value <= 0) {
-      throw new InputValidationError(`${name} must be a positive safe integer`);
-    }
-  }
+async function cloneWorkspaceDependencies(
+  workspaceRoot: string,
+  snapshotRoot: string,
+): Promise<void> {
+  const source = await realpath(join(workspaceRoot, "node_modules"));
+  const destination = join(snapshotRoot, "node_modules");
+  await cp(source, destination, {
+    recursive: true,
+    dereference: false,
+    verbatimSymlinks: true,
+    mode: fsConstants.COPYFILE_FICLONE,
+    filter: (path) => {
+      const info = lstatSync(path);
+      return !info.isSymbolicLink() || isContained(source, realpathSync(path));
+    },
+  });
+  await overlayWorkspacePackageDependencies(workspaceRoot, source, destination);
+  await assertPrivateDependencyLinks(destination);
 }
 
-function rejectDuplicates(values: string[], label: string): void {
-  if (new Set(values).size !== values.length) {
-    throw new InputValidationError(`${label} contain duplicates`);
-  }
-}
-
-function ensureContained(root: string, candidate: string, label: string): void {
-  const result = relative(root, candidate);
-  if (result === ".." || result.startsWith(`..${sep}`) || isAbsolute(result)) {
-    throw new InputValidationError(`${label} escapes its root`);
-  }
-}
-
-function resolvePnpmPath(configured: string | undefined): string {
-  if (configured !== undefined) {
-    if (!isAbsolute(configured) || configured.includes("\0")) {
-      throw new InputValidationError("pnpm executable path must be absolute");
-    }
-    return resolve(configured);
-  }
-  const executable = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
-  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
-    if (directory.length === 0) continue;
-    const candidate = resolve(directory, executable);
+async function overlayWorkspacePackageDependencies(
+  workspaceRoot: string,
+  workspaceNodeModules: string,
+  privateNodeModules: string,
+): Promise<void> {
+  const packagesRoot = join(workspaceRoot, "packages");
+  for (const packageEntry of await readdir(packagesRoot, {
+    withFileTypes: true,
+  })) {
+    if (!packageEntry.isDirectory()) continue;
+    const packageModules = join(
+      packagesRoot,
+      packageEntry.name,
+      "node_modules",
+    );
     try {
-      accessSync(candidate, fsConstants.X_OK);
-      return realpathSync(candidate);
-    } catch {
-      // Continue searching the minimal PATH without invoking a shell.
+      await overlayDependencyDirectory(
+        packageModules,
+        privateNodeModules,
+        workspaceNodeModules,
+        privateNodeModules,
+      );
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
     }
   }
-  throw new InputValidationError(
-    "Unable to resolve an absolute pnpm executable",
-  );
 }
 
-async function readBoundedFile(
+async function overlayDependencyDirectory(
+  sourceDirectory: string,
+  destinationDirectory: string,
+  workspaceNodeModules: string,
+  privateNodeModules: string,
+): Promise<void> {
+  for (const entry of await readdir(sourceDirectory, { withFileTypes: true })) {
+    const sourcePath = join(sourceDirectory, entry.name);
+    const destinationPath = join(destinationDirectory, entry.name);
+    if (entry.isDirectory() && entry.name.startsWith("@")) {
+      await mkdir(destinationPath, { recursive: true });
+      await overlayDependencyDirectory(
+        sourcePath,
+        destinationPath,
+        workspaceNodeModules,
+        privateNodeModules,
+      );
+      continue;
+    }
+    const info = await lstat(sourcePath);
+    if (!info.isSymbolicLink()) continue;
+    const target = await realpath(sourcePath);
+    if (!isContained(workspaceNodeModules, target)) continue;
+    const privateTarget = join(
+      privateNodeModules,
+      relative(workspaceNodeModules, target),
+    );
+    try {
+      await lstat(destinationPath);
+      continue;
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+    }
+    await symlink(
+      relative(dirname(destinationPath), privateTarget),
+      destinationPath,
+      "dir",
+    );
+  }
+}
+
+async function assertPrivateDependencyLinks(
+  privateNodeModules: string,
+): Promise<void> {
+  async function visit(directory: string): Promise<void> {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      const info = await lstat(path);
+      if (info.isSymbolicLink()) {
+        const target = await realpath(path);
+        if (!isContained(privateNodeModules, target)) {
+          throw new Error("Private dependency link escapes its clone");
+        }
+      } else if (info.isDirectory()) {
+        await visit(path);
+      }
+    }
+  }
+  await visit(privateNodeModules);
+}
+
+async function readFreshRegularFile(
   path: string,
   maxBytes: number,
-): Promise<string | null> {
+): Promise<
+  | { kind: "ok"; content: string }
+  | { kind: "missing" }
+  | { kind: "output-limit" }
+> {
+  let handle;
   try {
-    const info = await stat(path);
-    if (!info.isFile() || info.size > maxBytes) return null;
-    const content = await readFile(path);
-    return content.byteLength <= maxBytes ? content.toString("utf8") : null;
+    const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+    handle = await open(path, fsConstants.O_RDONLY | noFollow);
+    const info = await handle.stat();
+    if (!info.isFile()) return { kind: "missing" };
+    if (info.size > maxBytes) return { kind: "output-limit" };
+    const content = await handle.readFile();
+    return content.byteLength <= maxBytes
+      ? { kind: "ok", content: content.toString("utf8") }
+      : { kind: "output-limit" };
   } catch (error) {
-    if (isNotFound(error)) return "";
+    if (isNotFound(error) || isSymlinkOpenError(error)) {
+      return { kind: "missing" };
+    }
     throw error;
+  } finally {
+    await handle?.close();
   }
 }
 
-async function environmentDigest(workspaceRoot: string): Promise<string> {
-  const [manifest, lockfile] = await Promise.all([
-    readFile(join(workspaceRoot, "package.json"), "utf8"),
+async function resolveRuntimeIdentity(
+  workspaceRoot: string,
+  nodePath: string,
+  pnpmCliPath: string,
+): Promise<RuntimeIdentity> {
+  const minimalEnvironment = { PATH: process.env.PATH ?? "" };
+  const [nodeResult, pnpmResult, lockfile] = await Promise.all([
+    execa(nodePath, ["--version"], {
+      reject: false,
+      extendEnv: false,
+      env: minimalEnvironment,
+      timeout: 5_000,
+      maxBuffer: 1_024,
+    }),
+    execa(nodePath, [pnpmCliPath, "--version"], {
+      reject: false,
+      extendEnv: false,
+      env: minimalEnvironment,
+      timeout: 5_000,
+      maxBuffer: 1_024,
+    }),
     readFile(join(workspaceRoot, "pnpm-lock.yaml")),
   ]);
-  const packageManager = (JSON.parse(manifest) as { packageManager?: unknown })
-    .packageManager;
-  const pnpmVersion =
-    typeof packageManager === "string" && packageManager.startsWith("pnpm@")
-      ? packageManager.slice("pnpm@".length)
-      : "unknown";
-  return createHash("sha256")
+  if (
+    nodeResult.exitCode !== 0 ||
+    pnpmResult.exitCode !== 0 ||
+    typeof nodeResult.stdout !== "string" ||
+    typeof pnpmResult.stdout !== "string" ||
+    nodeResult.stdout.trim().length === 0 ||
+    pnpmResult.stdout.trim().length === 0
+  ) {
+    throw new InputValidationError(
+      "Unable to resolve actual Node/pnpm versions",
+    );
+  }
+  const nodeVersion = nodeResult.stdout.trim();
+  const pnpmVersion = pnpmResult.stdout.trim();
+  const lockfileDigest = createHash("sha256").update(lockfile).digest("hex");
+  const environmentDigest = createHash("sha256")
     .update(
       JSON.stringify({
-        nodeVersion: process.version,
+        nodeVersion,
         pnpmVersion,
-        lockfileDigest: createHash("sha256").update(lockfile).digest("hex"),
+        lockfileDigest,
         runnerVersion: RUNNER_VERSION,
       }),
     )
     .digest("hex");
+  return { nodeVersion, pnpmVersion, environmentDigest };
 }
 
-function sanitizeParsedFailures(
+function resolveNodePath(configured: string | undefined): string {
+  return resolveRegularFile(configured ?? process.execPath, "Node executable", {
+    executable: true,
+  });
+}
+
+function resolvePnpmCliPath(configured: string | undefined): string {
+  if (configured !== undefined) {
+    return resolveJavaScriptCli(configured);
+  }
+  const candidates = new Set<string>();
+  if (process.env.npm_execpath !== undefined) {
+    candidates.add(process.env.npm_execpath);
+  }
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    if (directory.length === 0) continue;
+    for (const name of ["pnpm.mjs", "pnpm.cjs", "pnpm.js"]) {
+      candidates.add(join(directory, name));
+      candidates.add(resolve(directory, "../lib/node_modules/pnpm/bin", name));
+      candidates.add(
+        resolve(directory, "../../node/node_modules/pnpm/bin", name),
+      );
+    }
+  }
+  for (const name of ["pnpm.mjs", "pnpm.cjs", "pnpm.js"]) {
+    candidates.add(
+      resolve(dirname(process.execPath), "../lib/node_modules/pnpm/bin", name),
+    );
+  }
+  for (const candidate of candidates) {
+    try {
+      return resolveJavaScriptCli(candidate);
+    } catch {
+      // Fail closed only after all non-shell JavaScript CLI candidates are exhausted.
+    }
+  }
+  throw new InputValidationError(
+    "No supported pnpm JavaScript CLI could be resolved without a shell",
+  );
+}
+
+function resolveJavaScriptCli(candidate: string): string {
+  if (!/\.(?:cjs|mjs|js)$/u.test(candidate)) {
+    throw new InputValidationError(
+      "pnpm must be a JavaScript CLI; batch and shell shims are unsupported",
+    );
+  }
+  return resolveRegularFile(candidate, "pnpm JavaScript CLI", {
+    executable: false,
+  });
+}
+
+function resolveRegularFile(
+  candidate: string,
+  label: string,
+  options: { executable: boolean },
+): string {
+  if (!isAbsolute(candidate) || candidate.includes("\0")) {
+    throw new InputValidationError(`${label} path must be absolute`);
+  }
+  try {
+    const resolved = realpathSync(candidate);
+    const info = lstatSync(resolved);
+    if (!info.isFile()) throw new Error("not a file");
+    accessSync(
+      resolved,
+      options.executable ? fsConstants.X_OK : fsConstants.R_OK,
+    );
+    return resolved;
+  } catch {
+    throw new InputValidationError(
+      `${label} is not an accessible regular file`,
+    );
+  }
+}
+
+function sanitizeParsedResult(
   parsed: ReturnType<typeof parseVitestResult>,
-  workspaceRoot: string,
-  temporaryRoot: string,
+  knownPaths: Array<string | null>,
 ): ReturnType<typeof parseVitestResult> {
   return {
     ...parsed,
     testCases: parsed.testCases.map((testCase) => ({
       ...testCase,
-      name: sanitizeOutput(testCase.name, workspaceRoot, temporaryRoot),
+      name: sanitizeOutput(testCase.name, knownPaths),
       failureMessage:
         testCase.failureMessage === null
           ? null
-          : sanitizeOutput(
-              testCase.failureMessage,
-              workspaceRoot,
-              temporaryRoot,
-            ),
+          : sanitizeOutput(testCase.failureMessage, knownPaths),
     })),
     observations: parsed.observations.map((observation) => ({
       ...observation,
-      testName: sanitizeOutput(
-        observation.testName,
-        workspaceRoot,
-        temporaryRoot,
-      ),
+      testName: sanitizeOutput(observation.testName, knownPaths),
     })),
   };
+}
+
+function sanitizeOutput(
+  value: string,
+  knownPaths: Array<string | null>,
+): string {
+  let sanitized = value;
+  const paths = knownPaths
+    .filter((path): path is string => path !== null && isAbsolute(path))
+    .sort((left, right) => right.length - left.length);
+  for (const path of paths)
+    sanitized = sanitized.replaceAll(path, "<absolute-path>");
+  const secretLine = new RegExp(
+    `(^|[\\t ,{])(["']?(?:${SECRET_LABEL_SOURCE})["']?\\s*[:=]\\s*)[^\\r\\n]*`,
+    "gimu",
+  );
+  sanitized = sanitized.replace(
+    secretLine,
+    (_whole, prefix: string, label: string) => `${prefix}${label}[REDACTED]`,
+  );
+  sanitized = sanitized.replace(
+    /(^|[\s("'=])((?:[A-Za-z]:[\\/]|\/)(?:[^\s:"'<>|]+[\\/])*[^\s:"'<>|]*)/gmu,
+    (_whole, prefix: string) => `${prefix}<absolute-path>`,
+  );
+  return sanitized;
 }
 
 function capOutput(
@@ -566,41 +851,38 @@ function truncateUtf8(value: string, maxBytes: number): string {
   return bounded;
 }
 
-function sanitizeOutput(
-  value: string,
-  workspaceRoot: string,
-  temporaryRoot: string | null,
-): string {
-  let sanitized = value;
-  const roots = [workspaceRoot, temporaryRoot].filter(
-    (root): root is string => root !== null,
-  );
-  for (const root of roots.sort((left, right) => right.length - left.length)) {
-    sanitized = sanitized.replaceAll(
-      root,
-      root === temporaryRoot ? "<sandbox>" : "<workspace>",
-    );
+function validatePolicy(policy: ExecutionRequest["policy"]): void {
+  for (const [name, value] of Object.entries(policy)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new InputValidationError(`${name} must be a positive safe integer`);
+    }
   }
-  sanitized = sanitized.replace(
-    /(["']?)([A-Za-z_][A-Za-z0-9_-]*)(\1\s*[:=]\s*)(["']?)([^\s,"'}]+)(["']?)/gu,
-    (
-      whole,
-      quote: string,
-      name: string,
-      separator: string,
-      valueQuote: string,
-      _value: string,
-      endQuote: string,
-    ) =>
-      SECRET_NAME.test(name)
-        ? `${quote}${name}${separator}${valueQuote}[REDACTED]${endQuote}`
-        : whole,
+}
+
+function rejectDuplicates(values: string[], label: string): void {
+  if (new Set(values).size !== values.length) {
+    throw new InputValidationError(`${label} contain duplicates`);
+  }
+}
+
+function toRepositoryPath(root: string, candidate: string): string {
+  ensureContained(root, candidate, "repository path");
+  return relative(root, candidate).split(sep).join("/");
+}
+
+function ensureContained(root: string, candidate: string, label: string): void {
+  if (!isContained(root, candidate)) {
+    throw new InputValidationError(`${label} escapes its root`);
+  }
+}
+
+function isContained(root: string, candidate: string): boolean {
+  const result = relative(root, candidate);
+  return !(
+    result === ".." ||
+    result.startsWith(`..${sep}`) ||
+    isAbsolute(result)
   );
-  sanitized = sanitized.replace(
-    /(?:[A-Za-z]:[\\/]|\/)(?:[^\s:"'<>|]+[\\/])*[^\s:"'<>|]*/gu,
-    (path) => (path.startsWith("<") ? path : "<absolute-path>"),
-  );
-  return sanitized;
 }
 
 function toUtf8(value: unknown): string {
@@ -626,7 +908,7 @@ async function terminateProcessTree(pid: number | undefined): Promise<void> {
   try {
     process.kill(-pid, "SIGKILL");
   } catch (error) {
-    if (!isNoSuchProcess(error)) throw error;
+    if (!isNoSuchProcess(error) && !isPermissionDenied(error)) throw error;
   }
 }
 
@@ -634,8 +916,16 @@ function isNotFound(error: unknown): boolean {
   return isNodeError(error) && error.code === "ENOENT";
 }
 
+function isSymlinkOpenError(error: unknown): boolean {
+  return isNodeError(error) && error.code === "ELOOP";
+}
+
 function isNoSuchProcess(error: unknown): boolean {
   return isNodeError(error) && error.code === "ESRCH";
+}
+
+function isPermissionDenied(error: unknown): boolean {
+  return isNodeError(error) && error.code === "EPERM";
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

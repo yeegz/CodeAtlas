@@ -1,21 +1,31 @@
+import { createHash } from "node:crypto";
 import {
+  access,
   chmod,
   lstat,
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
   readlink,
+  realpath,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, it } from "vitest";
+import { computeSnapshotDigest } from "../../analyzer/src/index.js";
 import { LocalExecutionProvider } from "../src/local-execution-provider.js";
 import type { ExecutionRequest } from "../src/execution-provider.js";
 
 const workspaceRoot = resolve(import.meta.dirname, "../../..");
+const snapshotShas = {
+  base: "abc58c76e50aaf580628c06e9b6e29e770f18a79",
+  head: "7cbef5433a2498f2c57fa5cd35ee0382b39ccbd2",
+} as const;
 
 function request(revision: "base" | "head"): ExecutionRequest {
   return {
@@ -25,7 +35,7 @@ function request(revision: "base" | "head"): ExecutionRequest {
       workspaceRoot,
       `fixtures/auth-regression/${revision}`,
     ),
-    snapshotSha: revision === "base" ? "base-sha" : "head-sha",
+    snapshotSha: snapshotShas[revision],
     testPaths: ["test/auth.test.ts"],
     generatedFiles: [],
     policy: { timeoutMs: 10_000, maxOutputBytes: 64 * 1024, maxFiles: 20 },
@@ -53,8 +63,8 @@ describe("LocalExecutionProvider", () => {
         Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr),
       ).toBeLessThan(64 * 1024);
     }
-    expect(base.snapshotSha).toBe("base-sha");
-    expect(head.snapshotSha).toBe("head-sha");
+    expect(base.snapshotSha).toBe(snapshotShas.base);
+    expect(head.snapshotSha).toBe(snapshotShas.head);
     expect(base.snapshotSha).not.toBe(head.snapshotSha);
     expect(base.environmentDigest).toMatch(/^[a-f0-9]{64}$/u);
     expect(head.environmentDigest).toBe(base.environmentDigest);
@@ -88,7 +98,13 @@ describe("LocalExecutionProvider", () => {
 
       expect(result.terminalState).toBe("TIMED_OUT");
       expect(result.exitCode).toBeNull();
-      expect(result.testCases).toEqual([]);
+      expect(result.testCases).toMatchObject([
+        {
+          path: "test/timeout.generated.test.ts",
+          status: "SKIPPED",
+          generatedObjectiveId: "timeout-objective",
+        },
+      ]);
       expect(await readdir(temporaryParent)).toEqual([]);
     } finally {
       await rm(temporaryParent, { recursive: true, force: true });
@@ -120,7 +136,7 @@ describe("LocalExecutionProvider", () => {
         policy: { timeoutMs: 10_000, maxOutputBytes: 1024, maxFiles: 10 },
       });
 
-      expect(result.terminalState).toBe("OUTPUT_LIMIT");
+      expect(result.terminalState, JSON.stringify(result)).toBe("OUTPUT_LIMIT");
       expect(
         Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr),
       ).toBeLessThanOrEqual(1024);
@@ -140,19 +156,14 @@ describe("LocalExecutionProvider", () => {
     const temporaryParent = await mkdtemp(
       join(tmpdir(), "codeatlas-malformed-test-"),
     );
-    const counterPath = join(fixtureRoot, "counter.txt");
-    const executablePath = join(fixtureRoot, "fake-pnpm.mjs");
     try {
-      await writeFile(
-        executablePath,
-        `#!/usr/bin/env node\nimport { appendFileSync, writeFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(counterPath)}, "1");\nconst output = process.argv.find((value) => value.startsWith("--outputFile="));\nif (output) writeFileSync(output.slice("--outputFile=".length), "{ malformed");\nconsole.log("API_TOKEN=local-secret");\nconsole.error(${JSON.stringify(`workspace=${workspaceRoot}`)});\n`,
-        { mode: 0o700 },
-      );
-      await chmod(executablePath, 0o700);
+      const fake = await createFakePnpm(fixtureRoot, {
+        body: `writeResult("{ malformed");\nconsole.log("API_TOKEN=local-secret");\nconsole.error(${JSON.stringify(`workspace=${workspaceRoot}`)});`,
+      });
       const provider = new LocalExecutionProvider({
         workspaceRoot,
         temporaryParent,
-        pnpmPath: executablePath,
+        pnpmPath: fake.cliPath,
       });
       const result = await provider.run(request("base"));
 
@@ -162,7 +173,7 @@ describe("LocalExecutionProvider", () => {
       expect(result.observations).toEqual([]);
       expect(result.stdout).not.toContain("local-secret");
       expect(result.stderr).not.toContain(workspaceRoot);
-      expect(await readFile(counterPath, "utf8")).toBe("1");
+      expect(await readFile(fake.counterPath, "utf8")).toBe("1");
       expect(await readdir(temporaryParent)).toEqual([]);
     } finally {
       await rm(temporaryParent, { recursive: true, force: true });
@@ -186,7 +197,7 @@ describe("LocalExecutionProvider", () => {
       ],
     });
 
-    expect(result.terminalState).toBe("COMPLETED");
+    expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
     expect(result.exitCode).toBe(1);
     expect(result.testCases).toMatchObject([
       { status: "PASSED", generatedObjectiveId: "failed-observation" },
@@ -240,9 +251,9 @@ describe("LocalExecutionProvider", () => {
         provider.run({
           ...request("base"),
           snapshotRoot: fixtureRoot,
-          testPaths: [],
+          testPaths: ["package.json"],
         }),
-      ).rejects.toThrow(/symbolic link/iu);
+      ).rejects.toThrow(/symlink|symbolic/iu);
     } finally {
       await rm(fixtureRoot, { recursive: true, force: true });
     }
@@ -253,6 +264,7 @@ describe("LocalExecutionProvider", () => {
     await expect(
       provider.run({
         ...request("base"),
+        testPaths: [],
         generatedFiles: [generatedFile("test/auth.test.ts")],
       }),
     ).rejects.toThrow(/overwrite/iu);
@@ -264,6 +276,354 @@ describe("LocalExecutionProvider", () => {
         policy: { timeoutMs: 10_000, maxOutputBytes: 64 * 1024, maxFiles: 3 },
       }),
     ).rejects.toThrow(/file limit/iu);
+  });
+
+  it("rejects a stale in-snapshot reporter file after a startup failure", async () => {
+    const fixtureRoot = await createSnapshot({
+      "package.json": '{"private":true,"type":"module"}\n',
+      "test/requested.test.ts": 'throw new Error("must not execute");\n',
+      ".codeatlas-vitest-result.json": '{"testResults":[],"coverageMap":{}}',
+    });
+    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
+    try {
+      const fake = await createFakePnpm(fakeRoot, {
+        body: "process.exitCode = 2;",
+      });
+      const provider = new LocalExecutionProvider({
+        workspaceRoot,
+        pnpmPath: fake.cliPath,
+      });
+      const result = await provider.run(
+        await snapshotRequest(fixtureRoot, ["test/requested.test.ts"]),
+      );
+
+      expect(result.terminalState).toBe("FAILED");
+      expect(result.exitCode, JSON.stringify(result)).toBe(2);
+      expect(result.testCases).toEqual([]);
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true });
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed on substituted suites and retains a missing generated test as SKIPPED", async () => {
+    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
+    try {
+      const fake = await createFakePnpm(fakeRoot, {
+        body: `const cwd = process.cwd();\nwriteResult({ testResults: [suite(resolve(cwd, "test/auth.test.ts")), suite(resolve(cwd, "test/substituted.test.ts"))], coverageMap: {} });`,
+      });
+      const provider = new LocalExecutionProvider({
+        workspaceRoot,
+        pnpmPath: fake.cliPath,
+      });
+      const generated = {
+        ...generatedFile("test/missing.generated.test.ts"),
+        objectiveId: "missing-objective",
+      };
+      const result = await provider.run({
+        ...request("base"),
+        generatedFiles: [generated],
+      });
+
+      expect(result.terminalState).toBe("FAILED");
+      expect(result.testCases).toContainEqual({
+        name: "Unexecuted generated test: test/missing.generated.test.ts",
+        path: "test/missing.generated.test.ts",
+        status: "SKIPPED",
+        failureMessage: null,
+        generatedObjectiveId: "missing-objective",
+      });
+      expect(
+        result.testCases.some(
+          (testCase) => testCase.path === "test/substituted.test.ts",
+        ),
+      ).toBe(false);
+    } finally {
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when an exact requested suite reports zero test cases", async () => {
+    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
+    try {
+      const fake = await createFakePnpm(fakeRoot, {
+        body: `const cwd = process.cwd();\nwriteResult({ testResults: [{ name: resolve(cwd, "test/auth.test.ts"), assertionResults: [] }], coverageMap: {} });`,
+      });
+      const provider = new LocalExecutionProvider({
+        workspaceRoot,
+        pnpmPath: fake.cliPath,
+      });
+      const result = await provider.run(request("base"));
+      expect(result.terminalState).toBe("FAILED");
+      expect(result.testCases).toEqual([]);
+    } finally {
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("rejects runtime-created, nonexistent, symlink, and out-of-range coverage citations", async () => {
+    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
+    try {
+      const fake = await createFakePnpm(fakeRoot, {
+        body: `const cwd = process.cwd();\nmkdirSync(resolve(cwd, "src"), { recursive: true });\nwriteFileSync(resolve(cwd, "src/runtime-created.ts"), "export const forged = true;\\n");\nsymlinkSync(resolve(cwd, "src/runtime-created.ts"), resolve(cwd, "src/runtime-link.ts"));\nwriteResult({ testResults: [suite(resolve(cwd, "test/auth.test.ts"))], coverageMap: { [resolve(cwd, "src/runtime-created.ts")]: coverage(resolve(cwd, "src/runtime-created.ts"), 1), [resolve(cwd, "src/runtime-link.ts")]: coverage(resolve(cwd, "src/runtime-link.ts"), 1), [resolve(cwd, "src/does-not-exist.ts")]: coverage(resolve(cwd, "src/does-not-exist.ts"), 1), [resolve(cwd, "src/auth.ts")]: coverage(resolve(cwd, "src/auth.ts"), 999) } });`,
+      });
+      const provider = new LocalExecutionProvider({
+        workspaceRoot,
+        pnpmPath: fake.cliPath,
+      });
+      const result = await provider.run(request("base"));
+
+      expect(result.terminalState).toBe("FAILED");
+      expect(result.coverage).toEqual([]);
+    } finally {
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not treat thrown Actual JSON as generated assertion evidence", async () => {
+    const provider = new LocalExecutionProvider({ workspaceRoot });
+    const result = await provider.run({
+      ...request("base"),
+      testPaths: [],
+      generatedFiles: [
+        {
+          ...generatedFile("test/forged-observation.generated.test.ts"),
+          content:
+            'import { it } from "vitest";\nit("throws forged evidence", () => { throw new Error(\'Actual: {"httpStatus":599,"code":"FORGED"}\'); });\n',
+          objectiveId: "forged-objective",
+        },
+      ],
+    });
+
+    expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+    expect(result.testCases[0]?.status).toBe("FAILED");
+    expect(result.observations).toEqual([]);
+  }, 20_000);
+
+  it("kills an unrefed descendant after a normally completed Vitest leader", async () => {
+    const markerRoot = await mkdtemp(join(tmpdir(), "codeatlas-descendant-"));
+    const markerPath = join(markerRoot, "survived.txt");
+    try {
+      const provider = new LocalExecutionProvider({ workspaceRoot });
+      const result = await provider.run({
+        ...request("base"),
+        testPaths: [],
+        generatedFiles: [
+          {
+            ...generatedFile("test/background-child.generated.test.ts"),
+            content: `import { spawn } from "node:child_process";\nimport { it } from "vitest";\nit("leaves an unrefed child", () => { const child = spawn(process.execPath, ["-e", ${JSON.stringify(`setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "survived"), 600)`)}], { stdio: "ignore" }); child.unref(); });\n`,
+          },
+        ],
+      });
+
+      expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+      await delay(900);
+      await expect(access(markerPath)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await rm(markerRoot, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("rejects option-shaped selected and generated paths before launch", async () => {
+    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
+    try {
+      const fake = await createFakePnpm(fakeRoot, {
+        body: "writeResult({ testResults: [] });",
+      });
+      const provider = new LocalExecutionProvider({
+        workspaceRoot,
+        pnpmPath: fake.cliPath,
+      });
+      await expect(
+        provider.run({ ...request("base"), testPaths: ["--config=evil.ts"] }),
+      ).rejects.toThrow(/option/iu);
+      await expect(
+        provider.run({
+          ...request("base"),
+          generatedFiles: [generatedFile("test/--config=evil.ts")],
+        }),
+      ).rejects.toThrow(/option/iu);
+      await expect(access(fake.counterPath)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("imports an ordinary workspace dependency from a private clone", async () => {
+    const provider = new LocalExecutionProvider({ workspaceRoot });
+    const dependenciesBefore = await workspaceDependencyState();
+    const result = await provider.run({
+      ...request("base"),
+      testPaths: [],
+      generatedFiles: [
+        {
+          ...generatedFile("test/zod.generated.test.ts"),
+          content: `import { realpathSync } from "node:fs";\nimport { fileURLToPath } from "node:url";\nimport { expect, it } from "vitest";\nimport { z } from "zod";\nit("imports zod", () => { const dependency = realpathSync(fileURLToPath(new URL("../node_modules/zod", import.meta.url))); expect(dependency).not.toContain(${JSON.stringify(workspaceRoot)}); expect(z.string().parse("ok")).toBe("ok"); });\n`,
+          objectiveId: "dependency-objective",
+        },
+      ],
+    });
+
+    expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+    expect(result.testCases).toMatchObject([{ status: "PASSED" }]);
+    expect(await workspaceDependencyState()).toEqual(dependenciesBefore);
+  }, 20_000);
+
+  it("rejects a snapshot digest mismatch before launching a subprocess", async () => {
+    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
+    try {
+      const fake = await createFakePnpm(fakeRoot, {
+        body: "writeResult({ testResults: [] });",
+      });
+      const provider = new LocalExecutionProvider({
+        workspaceRoot,
+        pnpmPath: fake.cliPath,
+      });
+      await expect(
+        provider.run({ ...request("base"), snapshotSha: "0".repeat(40) }),
+      ).rejects.toThrow(/snapshot digest/iu);
+      await expect(access(fake.counterPath)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a supplied snapshot root outside the provider workspace", async () => {
+    const fixtureRoot = await createSnapshot(
+      {
+        "package.json": '{"private":true,"type":"module"}\n',
+        "test/requested.test.ts":
+          'throw new Error("fake runner owns reporting");\n',
+      },
+      tmpdir(),
+    );
+    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
+    try {
+      const fake = await createFakePnpm(fakeRoot, {
+        body: `const cwd = process.cwd();\nwriteResult({ testResults: [suite(resolve(cwd, "test/requested.test.ts"))], coverageMap: {} });`,
+      });
+      const provider = new LocalExecutionProvider({
+        workspaceRoot,
+        pnpmPath: fake.cliPath,
+      });
+      const result = await provider.run(
+        await snapshotRequest(fixtureRoot, ["test/requested.test.ts"]),
+      );
+      expect(result.terminalState).toBe("COMPLETED");
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true });
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("hashes actual child Node and pnpm versions in the environment digest", async () => {
+    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
+    try {
+      const fake = await createFakePnpm(fakeRoot, {
+        version: "99.1.2",
+        body: `const cwd = process.cwd();\nwriteResult({ testResults: [suite(resolve(cwd, "test/auth.test.ts"))], coverageMap: {} });`,
+      });
+      const provider = new LocalExecutionProvider({
+        workspaceRoot,
+        pnpmPath: fake.cliPath,
+      });
+      const result = await provider.run(request("base"));
+      const lockfileDigest = createHash("sha256")
+        .update(await readFile(join(workspaceRoot, "pnpm-lock.yaml")))
+        .digest("hex");
+      const expected = createHash("sha256")
+        .update(
+          JSON.stringify({
+            nodeVersion: process.version,
+            pnpmVersion: "99.1.2",
+            lockfileDigest,
+            runnerVersion: "0.1.0",
+          }),
+        )
+        .digest("hex");
+
+      expect(result.environmentDigest).toBe(expected);
+    } finally {
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("redacts secret-labeled multiword values through end-of-line", async () => {
+    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
+    try {
+      const fake = await createFakePnpm(fakeRoot, {
+        body: `console.log("Authorization: Bearer hunter2");\nwriteResult("{ malformed");`,
+      });
+      const provider = new LocalExecutionProvider({
+        workspaceRoot,
+        pnpmPath: fake.cliPath,
+      });
+      const result = await provider.run(request("base"));
+      expect(result.stdout).toContain("Authorization: [REDACTED]");
+      expect(result.stdout).not.toContain("Bearer hunter2");
+      expect(result.stdout).not.toContain("hunter2");
+    } finally {
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("redacts a known absolute path containing spaces as one value", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "codeatlas-path-redaction-"));
+    const fakeRoot = join(parent, "folder with spaces");
+    await mkdir(fakeRoot);
+    try {
+      const cliPath = join(fakeRoot, "fake-pnpm.mjs");
+      const fake = await createFakePnpm(fakeRoot, {
+        body: `console.log(${JSON.stringify(`cli=${cliPath}`)});\nwriteResult("{ malformed");`,
+      });
+      const provider = new LocalExecutionProvider({
+        workspaceRoot,
+        pnpmPath: fake.cliPath,
+      });
+      const result = await provider.run(request("base"));
+      expect(result.stdout).toContain("cli=<absolute-path>");
+      expect(result.stdout).not.toContain("folder with spaces");
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a symlink substituted for the fresh control result file", async () => {
+    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-result-symlink-"));
+    const targetPath = join(fakeRoot, "forged-result.json");
+    try {
+      const fake = await createFakePnpm(fakeRoot, {
+        body: `writeFileSync(${JSON.stringify(targetPath)}, JSON.stringify({ testResults: [suite(resolve(process.cwd(), "test/auth.test.ts"))], coverageMap: {} }));\nsymlinkSync(${JSON.stringify(targetPath)}, outputPath);`,
+      });
+      const provider = new LocalExecutionProvider({
+        workspaceRoot,
+        pnpmPath: fake.cliPath,
+      });
+      const result = await provider.run(request("base"));
+      expect(result.terminalState).toBe("FAILED");
+      expect(result.testCases).toEqual([]);
+    } finally {
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a configured pnpm batch shim instead of invoking a shell", async () => {
+    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-pnpm-shim-"));
+    const shimPath = join(fakeRoot, "pnpm.cmd");
+    try {
+      await writeFile(shimPath, "@echo off\r\n", { mode: 0o700 });
+      expect(
+        () => new LocalExecutionProvider({ workspaceRoot, pnpmPath: shimPath }),
+      ).toThrow(/JavaScript CLI|batch|shell/iu);
+    } finally {
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
   });
 });
 
@@ -295,6 +655,11 @@ async function workspaceDependencyState(): Promise<unknown> {
           size: info.size,
           link: info.isSymbolicLink() ? await readlink(absolutePath) : null,
           content: info.isFile() ? await readFile(absolutePath, "utf8") : null,
+          targetDigest:
+            info.isSymbolicLink() &&
+            (path === "node_modules/vitest" || path.includes("coverage-v8"))
+              ? await computeSnapshotDigest(await realpath(absolutePath))
+              : null,
         };
       } catch (error) {
         if (
@@ -308,4 +673,78 @@ async function workspaceDependencyState(): Promise<unknown> {
       }
     }),
   );
+}
+
+async function createSnapshot(
+  files: Record<string, string>,
+  parent = workspaceRoot,
+): Promise<string> {
+  const root = await mkdtemp(join(parent, ".runner-review-snapshot-"));
+  for (const [path, content] of Object.entries(files)) {
+    const destination = join(root, path);
+    await mkdir(resolve(destination, ".."), { recursive: true });
+    await writeFile(destination, content);
+  }
+  return root;
+}
+
+async function snapshotRequest(
+  snapshotRoot: string,
+  testPaths: string[],
+): Promise<ExecutionRequest> {
+  return {
+    analysisId: "review-analysis",
+    revision: "base",
+    snapshotRoot,
+    snapshotSha: await computeSnapshotDigest(snapshotRoot),
+    testPaths,
+    generatedFiles: [],
+    policy: { timeoutMs: 10_000, maxOutputBytes: 64 * 1024, maxFiles: 20 },
+  };
+}
+
+interface FakePnpmOptions {
+  body: string;
+  version?: string;
+}
+
+async function createFakePnpm(
+  root: string,
+  options: FakePnpmOptions,
+): Promise<{ cliPath: string; counterPath: string }> {
+  const cliPath = join(root, "fake-pnpm.mjs");
+  const counterPath = join(root, "runs.txt");
+  await writeFile(
+    cliPath,
+    `#!/usr/bin/env node
+import { appendFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+if (process.argv.includes("--version")) {
+  console.log(${JSON.stringify(options.version ?? "11.9.0")});
+  process.exit(0);
+}
+appendFileSync(${JSON.stringify(counterPath)}, "1");
+const output = process.argv.find((value) => value.startsWith("--outputFile="));
+const outputPath = output?.slice("--outputFile=".length);
+const root = process.argv.find((value) => value.startsWith("--root="));
+if (root) process.chdir(root.slice("--root=".length));
+const writeResult = (value) => {
+  if (!outputPath) return;
+  writeFileSync(outputPath, typeof value === "string" ? value : JSON.stringify(value));
+};
+const suite = (name, status = "passed") => ({
+  name,
+  assertionResults: [{ fullName: "requested case", title: "requested case", status, failureMessages: [] }]
+});
+const coverage = (path, line) => ({
+  path,
+  statementMap: { "0": { start: { line, column: 0 }, end: { line, column: 1 } } },
+  s: { "0": 1 }
+});
+${options.body}
+`,
+    { mode: 0o700 },
+  );
+  await chmod(cliPath, 0o700);
+  return { cliPath, counterPath };
 }

@@ -10,6 +10,7 @@
     }
   },
   "dependencies": {
+    "@codeatlas/analyzer": "workspace:*",
     "execa": "9.6.0"
   }
 }
