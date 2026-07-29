@@ -1,0 +1,7 @@
+.superpowers/
+.codeatlas/
+docs/superpowers/
+.next/
+coverage/
+dist/
+pnpm-lock.yaml

@@ -1,4 +1,5 @@
 .superpowers/
+.codeatlas/
 .worktrees/
 .env
 .env.*
