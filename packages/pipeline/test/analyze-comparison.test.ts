@@ -613,6 +613,7 @@ describe("LocalArtifactStore", () => {
         repositoryRoot,
         `.codeatlas/runs/${analysisId}`,
       );
+      const artifactDirectorySuffix = `.codeatlas/runs/${analysisId}`;
       let tempCreated = false;
       const fileSystem = injectedFileSystem({
         async open(path, flags, mode) {
@@ -621,7 +622,7 @@ describe("LocalArtifactStore", () => {
           return handle;
         },
         async realpath(path) {
-          if (tempCreated && String(path) === artifactDirectory) {
+          if (tempCreated && String(path).endsWith(artifactDirectorySuffix)) {
             throw new Error("parent identity revalidation failed");
           }
           return realpath(path);
