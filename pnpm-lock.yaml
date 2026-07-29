@@ -66,6 +66,12 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
 
+  packages/selector:
+    dependencies:
+      '@codeatlas/analyzer':
+        specifier: workspace:*
+        version: link:../analyzer
+
 packages:
 
   '@emnapi/core@1.11.1':

@@ -3,6 +3,7 @@
   "files": [],
   "references": [
     { "path": "./packages/evidence" },
-    { "path": "./packages/analyzer" }
+    { "path": "./packages/analyzer" },
+    { "path": "./packages/selector" }
   ]
 }
