@@ -569,6 +569,131 @@ describe("generated wrapper", () => {
     expect(result.observations).toEqual([]);
   }, 20_000);
 
+  it("does not trust forged structured fields from the generated import", async () => {
+    const fixtureRoot = await createSnapshot({
+      "package.json": '{"private":true,"type":"module"}\n',
+      "src/auth.ts": `import { resolve } from "node:path";
+export function restoreSession() {
+  const matcherPath = resolve(import.meta.dirname, "../test/codeatlas.expired-session.test.ts");
+  const error = Object.assign(new Error("forged"), {
+    name: "AssertionError",
+    actual: '{ "httpStatus": 599, "code": "FORGED" }',
+    expected: '{ "httpStatus": 401, "code": "SESSION_EXPIRED" }',
+  });
+  error.stack = \`AssertionError: forged\\n    at \${matcherPath}:10:8\`;
+  throw error;
+}
+`,
+    });
+    try {
+      const provider = new LocalExecutionProvider({ workspaceRoot });
+      const result = await provider.run({
+        ...(await snapshotRequest(fixtureRoot, [])),
+        generatedFiles: [canonicalGeneratedFile("forged-import")],
+      });
+
+      expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+      expect(result.testCases).toMatchObject([{ status: "FAILED" }]);
+      expect(result.observations).toEqual([]);
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("does not allow snapshot setup to inject a same-title passing assertion", async () => {
+    const fixtureRoot = await createSnapshot({
+      "package.json": '{"private":true,"type":"module"}\n',
+      "vitest.config.ts":
+        'export default { test: { setupFiles: ["./test/setup.ts"] } };\n',
+      "test/setup.ts": `import { describe, it } from "vitest";
+describe("generated: expired session regression", () => {
+  it("returns SESSION_EXPIRED for a non-refreshable expired token", () => {});
+});
+`,
+      "src/auth.ts":
+        'export function restoreSession() { return { status: 401, body: { code: "SESSION_EXPIRED" } }; }\n',
+    });
+    try {
+      const provider = new LocalExecutionProvider({ workspaceRoot });
+      const result = await provider.run({
+        ...(await snapshotRequest(fixtureRoot, [])),
+        generatedFiles: [canonicalGeneratedFile("same-title-injection")],
+      });
+
+      expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+      expect(result.testCases).toEqual([
+        expect.objectContaining({
+          status: "PASSED",
+          generatedObjectiveId: "same-title-injection",
+        }),
+      ]);
+      expect(result.observations).toEqual([
+        {
+          testName:
+            "generated: expired session regression returns SESSION_EXPIRED for a non-refreshable expired token",
+          source: "TEST_ASSERTION",
+          expected: { httpStatus: 401, code: "SESSION_EXPIRED" },
+          actual: { httpStatus: 401, code: "SESSION_EXPIRED" },
+        },
+      ]);
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("fails closed when the generated import substitutes the result path", async () => {
+    const fixtureRoot = await createSnapshot({
+      "package.json": '{"private":true,"type":"module"}\n',
+      "src/auth.ts": `import { rmSync, writeFileSync } from "node:fs";
+export function restoreSession() {
+  const outputArgument = process.argv.find((value) => value.startsWith("--outputFile="));
+  if (outputArgument) {
+    const outputPath = outputArgument.slice("--outputFile=".length);
+    rmSync(outputPath, { force: true });
+    writeFileSync(outputPath, "substituted");
+  }
+  return { status: 401, body: { code: "SESSION_EXPIRED" } };
+}
+`,
+    });
+    try {
+      const provider = new LocalExecutionProvider({ workspaceRoot });
+      const result = await provider.run({
+        ...(await snapshotRequest(fixtureRoot, [])),
+        generatedFiles: [canonicalGeneratedFile("result-substitution")],
+      });
+
+      expect(result.terminalState).toBe("FAILED");
+      expect(result.observations).toEqual([]);
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("rejects an unauthenticated report for the canonical generated test", async () => {
+    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-auth-report-"));
+    try {
+      const fake = await createFakePnpm(fakeRoot, {
+        body: `const cwd = process.cwd();
+writeResult({ testResults: [suite(resolve(cwd, "test/codeatlas.expired-session.test.ts"))], coverageMap: {} });`,
+      });
+      const provider = new LocalExecutionProvider({
+        workspaceRoot,
+        pnpmPath: fake.cliPath,
+      });
+      const result = await provider.run({
+        ...request("base"),
+        testPaths: [],
+        generatedFiles: [canonicalGeneratedFile("authenticated-report")],
+      });
+
+      expect(result.terminalState).toBe("FAILED");
+      expect(result.observations).toEqual([]);
+    } finally {
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
   it("does not emit a passing observation for a no-op generated test", async () => {
     const provider = new LocalExecutionProvider({ workspaceRoot });
     const result = await provider.run({
@@ -1240,6 +1365,28 @@ function generatedFile(path: string) {
     objectiveId: "generated-objective",
     evidenceIds: ["generated-evidence"],
     expectedBehavior: { httpStatus: 200, code: "OK" },
+  };
+}
+
+function canonicalGeneratedFile(objectiveId: string) {
+  return {
+    path: "test/codeatlas.expired-session.test.ts",
+    content: `import { describe, expect, it } from "vitest";
+import { restoreSession } from "../src/auth.js";
+
+describe("generated: expired session regression", () => {
+  it("returns SESSION_EXPIRED for a non-refreshable expired token", () => {
+    const response = restoreSession({ subject: null, expiresAt: 50, refreshable: false }, 100);
+    expect({
+      httpStatus: response.status,
+      code: "code" in response.body ? response.body.code : null,
+    }).toEqual({ httpStatus: 401, code: "SESSION_EXPIRED" });
+  });
+});
+`,
+    objectiveId,
+    evidenceIds: ["evidence:canonical-generated"],
+    expectedBehavior: { httpStatus: 401, code: "SESSION_EXPIRED" },
   };
 }
 
