@@ -713,7 +713,7 @@ await execa(pnpmPath, [
 });
 ```
 
-Always delete the temporary directory in `finally`. Redact absolute workspace paths and environment-shaped secrets from returned logs. Hash Node version, pnpm version, lockfile digest, and runner version into `environmentDigest`. For generated tests, use the declared expected behavior when the assertion passes. When it fails, parse Vitest's serialized `toBe` and `toEqual` assertion values for the status and code; if either value cannot be parsed, omit the observation and force the later finding to `UNVERIFIED`.
+Always delete the temporary directory in `finally`. Redact absolute workspace paths and environment-shaped secrets from returned logs. Hash Node version, pnpm version, lockfile digest, and runner version into `environmentDigest`. Generated observations are authoritative only for the narrow template's single structured object assertion, which binds HTTP status and response code atomically. For passing assertions, use the declared expected object; for failures, parse Vitest's serialized `toEqual` expected and actual objects. If either object cannot be validated, omit the observation and force the later finding to `UNVERIFIED`.
 
 - [ ] **Step 4: Add timeout and output-cap tests**
 
@@ -811,8 +811,10 @@ import { restoreSession } from "../src/auth.js";
 describe("generated: expired session regression", () => {
   it("returns SESSION_EXPIRED for a non-refreshable expired token", () => {
     const response = restoreSession({ subject: null, expiresAt: 50, refreshable: false }, 100);
-    expect(response.status).toBe(401);
-    expect("code" in response.body ? response.body.code : null).toBe("SESSION_EXPIRED");
+    expect({
+      httpStatus: response.status,
+      code: "code" in response.body ? response.body.code : null,
+    }).toEqual({ httpStatus: 401, code: "SESSION_EXPIRED" });
   });
 });
 ```
