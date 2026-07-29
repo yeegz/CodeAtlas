@@ -1,13 +1,19 @@
 import type { ChangedSymbol } from "@codeatlas/analyzer";
 import {
   EvidenceItemSchema,
+  FindingSchema,
+  type ConfidenceFactor,
   type EvidenceItem,
   type Finding,
+  type FindingConfidence,
   type FindingEvidence,
   type FindingState,
 } from "@codeatlas/evidence";
 import type { GeneratedTest, TestObjective } from "@codeatlas/generator";
-import type { ExecutionResult } from "@codeatlas/runner";
+import {
+  hasValidExecutionResultBinding,
+  type ExecutionResult,
+} from "@codeatlas/runner";
 import type { SelectionEdge, TestSelection } from "@codeatlas/selector";
 
 export interface ExecutionComparison {
@@ -35,17 +41,15 @@ export interface ComparisonInput {
   readonly evidenceItems: readonly EvidenceItem[];
 }
 
-export interface ComparisonConfidence {
-  readonly level: "HIGH" | "MEDIUM" | "LOW";
-  readonly factors: readonly string[];
-}
+export type ComparisonConfidence = FindingConfidence;
 
 export interface ComparisonFinding extends Finding {
   readonly graphPath: string;
-  readonly confidence: ComparisonConfidence;
+  readonly confidence: FindingConfidence;
 }
 
 interface TestIdentity {
+  provenance: "GENERATED" | "EXISTING";
   path: string;
   objectiveId: string | null;
   expected: Behavior | null;
@@ -67,33 +71,65 @@ interface PairOutcome {
   headObserved: Behavior | null;
 }
 
+interface RevisionIdentity {
+  baseSha: string;
+  headSha: string;
+  target: ChangedSymbol;
+}
+
+interface ResolvedPath {
+  display: string;
+  targetId: string;
+  evidenceIds: string[];
+}
+
+interface EvidenceAssessment {
+  current: boolean;
+  ids: string[];
+  items: EvidenceItem[];
+  limitations: string[];
+}
+
+interface ExecutionAssessment {
+  integrity: boolean;
+  baseCount: number;
+  headCount: number;
+  limitations: string[];
+}
+
+type RuntimePair = { base: unknown; head: unknown; reference: object };
+
 const ARTIFACT_DIGEST = /^sha256:[0-9a-f]{64}$/u;
+const FALLBACK_SHA = "0".repeat(40);
 
 export function compareRuns(input: ComparisonInput): ComparisonFinding[] {
-  if (
-    typeof input !== "object" ||
-    input === null ||
-    typeof input.findingId !== "string" ||
-    input.findingId.length === 0
-  ) {
-    return Object.freeze([]) as unknown as ComparisonFinding[];
+  const rawInput: unknown = input;
+  if (!isRecord(rawInput) || !validIdentifier(rawInput.findingId)) {
+    return frozenEmpty();
   }
 
+  const findingId = rawInput.findingId;
   const limitations: string[] = [];
-  const identity = identifyTest(input.test);
+  const identity = identifyTest(rawInput.test);
   if (!identity.valid) {
     addLimitation(
       limitations,
       "The compared test identity does not match its objective.",
     );
   }
+  if (identity.provenance === "EXISTING") {
+    addLimitation(
+      limitations,
+      "Existing selected tests do not provide a trusted structured behavioral observation.",
+    );
+  }
 
   const revisions = expectedRevisions(
-    input.changedSymbols,
+    Array.isArray(rawInput.changedSymbols) ? rawInput.changedSymbols : [],
     identity.targetName,
   );
   const path = resolveGraphPath(
-    input.graphPath,
+    Array.isArray(rawInput.graphPath) ? rawInput.graphPath : [],
     identity.entryPointName,
     identity.targetName,
   );
@@ -101,7 +137,7 @@ export function compareRuns(input: ComparisonInput): ComparisonFinding[] {
     revisions !== null &&
     path !== null &&
     path.targetId === revisions.target.id &&
-    objectiveMatchesChange(input.test, revisions.target);
+    objectiveMatchesChange(rawInput.test, revisions.target);
   if (!exactPath) {
     addLimitation(
       limitations,
@@ -109,21 +145,41 @@ export function compareRuns(input: ComparisonInput): ComparisonFinding[] {
     );
   }
 
-  const comparisons = Array.isArray(input.comparisons) ? input.comparisons : [];
-  if (comparisons.length < 2) {
+  const rawComparisons = Array.isArray(rawInput.comparisons)
+    ? rawInput.comparisons
+    : [];
+  const pairs = runtimePairs(rawComparisons);
+  if (rawComparisons.length !== pairs.length) {
+    addLimitation(limitations, "A base/head execution pair is malformed.");
+  }
+  if (pairs.length < 2) {
     addLimitation(
       limitations,
       "Fewer than two base/head comparisons were available.",
     );
   }
 
+  const execution = assessExecutionBindings(pairs);
+  for (const limitation of execution.limitations) {
+    addLimitation(limitations, limitation);
+  }
+
+  const completePairs = pairs.filter(
+    (
+      pair,
+    ): pair is RuntimePair & {
+      base: ExecutionResult;
+      head: ExecutionResult;
+    } => isExecutionResultShape(pair.base) && isExecutionResultShape(pair.head),
+  );
   const snapshotsConsistent =
     revisions !== null &&
-    comparisons.length > 0 &&
-    comparisons.every(
+    completePairs.length === pairs.length &&
+    completePairs.length > 0 &&
+    completePairs.every(
       ({ base, head }) =>
-        base?.revision === "base" &&
-        head?.revision === "head" &&
+        base.revision === "base" &&
+        head.revision === "head" &&
         base.snapshotSha === revisions.baseSha &&
         head.snapshotSha === revisions.headSha,
     );
@@ -135,21 +191,23 @@ export function compareRuns(input: ComparisonInput): ComparisonFinding[] {
   }
 
   const completed =
-    comparisons.length > 0 &&
-    comparisons.every(
+    completePairs.length === pairs.length &&
+    completePairs.length > 0 &&
+    completePairs.every(
       ({ base, head }) =>
-        base?.terminalState === "COMPLETED" &&
-        head?.terminalState === "COMPLETED",
+        base.terminalState === "COMPLETED" &&
+        head.terminalState === "COMPLETED",
     );
   if (!completed) {
     addLimitation(limitations, "Base and head did not both complete.");
   }
 
-  const environmentDigests = comparisons.flatMap(({ base, head }) => [
-    base?.environmentDigest,
-    head?.environmentDigest,
+  const environmentDigests = completePairs.flatMap(({ base, head }) => [
+    base.environmentDigest,
+    head.environmentDigest,
   ]);
   const environmentsMatch =
+    completePairs.length === pairs.length &&
     environmentDigests.length > 0 &&
     environmentDigests.every(
       (digest) =>
@@ -164,16 +222,11 @@ export function compareRuns(input: ComparisonInput): ComparisonFinding[] {
     );
   }
 
-  const observedExpected =
-    identity.expected ?? expectedFromObservations(comparisons, identity);
-  const evaluatedIdentity: TestIdentity = {
-    ...identity,
-    expected: observedExpected,
-  };
-  const pairOutcomes = comparisons.map((comparison) =>
-    outcomeForPair(comparison, evaluatedIdentity),
+  const pairOutcomes = completePairs.map((comparison) =>
+    outcomeForPair(comparison, identity),
   );
   const exactTestExecuted =
+    pairOutcomes.length === pairs.length &&
     pairOutcomes.length > 0 &&
     pairOutcomes.every(
       ({ baseStatus, headStatus }) =>
@@ -185,14 +238,14 @@ export function compareRuns(input: ComparisonInput): ComparisonFinding[] {
   if (!exactTestExecuted) {
     addLimitation(
       limitations,
-      input.test.provenance === "GENERATED"
+      identity.provenance === "GENERATED"
         ? "The exact generated test was not executed on both revisions."
         : "The exact existing test was not executed on both revisions.",
     );
   }
 
   const evidence = assessEvidence(
-    input.evidenceItems,
+    rawInput.evidenceItems,
     revisions,
     identity,
     path,
@@ -200,6 +253,7 @@ export function compareRuns(input: ComparisonInput): ComparisonFinding[] {
   for (const limitation of evidence.limitations) {
     addLimitation(limitations, limitation);
   }
+  if (evidence.items.length === 0) return frozenEmpty();
 
   const baseStatuses = pairOutcomes.map(({ baseStatus }) => baseStatus);
   const headStatuses = pairOutcomes.map(({ headStatus }) => headStatus);
@@ -219,7 +273,7 @@ export function compareRuns(input: ComparisonInput): ComparisonFinding[] {
     pairOutcomes.map(({ headObserved }) => headObserved),
   );
   const baseBehavior = basePassed
-    ? evaluatedIdentity.expected
+    ? identity.expected
     : repeatedBehavior(pairOutcomes.map(({ baseObserved }) => baseObserved));
 
   const contradictory =
@@ -235,11 +289,11 @@ export function compareRuns(input: ComparisonInput): ComparisonFinding[] {
   }
 
   const validatedHeadDifference =
+    identity.provenance === "GENERATED" &&
     headFailed &&
-    headBehavior !== null &&
-    typeof headBehavior === "object" &&
-    evaluatedIdentity.expected !== null &&
-    !sameBehavior(headBehavior, evaluatedIdentity.expected);
+    isBehavior(headBehavior) &&
+    identity.expected !== null &&
+    !sameBehavior(headBehavior, identity.expected);
   if (headPassed) {
     addLimitation(
       limitations,
@@ -252,14 +306,30 @@ export function compareRuns(input: ComparisonInput): ComparisonFinding[] {
     );
   }
 
+  const baseAndHeadSame =
+    baseFailed &&
+    headFailed &&
+    isBehavior(baseBehavior) &&
+    isBehavior(headBehavior) &&
+    sameBehavior(baseBehavior, headBehavior);
+  if (baseAndHeadSame) {
+    addLimitation(
+      limitations,
+      "Base and head failed with the same observed behavior, so no differential change was established.",
+    );
+  }
+
   const commonConfirmationGates =
     identity.valid &&
+    identity.provenance === "GENERATED" &&
     exactPath &&
+    execution.integrity &&
     snapshotsConsistent &&
     completed &&
     environmentsMatch &&
     exactTestExecuted &&
-    comparisons.length >= 2 &&
+    execution.baseCount >= 2 &&
+    execution.headCount >= 2 &&
     !contradictory &&
     validatedHeadDifference &&
     evidence.current;
@@ -270,10 +340,8 @@ export function compareRuns(input: ComparisonInput): ComparisonFinding[] {
   } else if (
     commonConfirmationGates &&
     baseFailed &&
-    baseBehavior !== null &&
-    typeof baseBehavior === "object" &&
-    headBehavior !== null &&
-    typeof headBehavior === "object" &&
+    isBehavior(baseBehavior) &&
+    isBehavior(headBehavior) &&
     !sameBehavior(baseBehavior, headBehavior)
   ) {
     state = "CONFIRMED_CHANGE";
@@ -283,7 +351,9 @@ export function compareRuns(input: ComparisonInput): ComparisonFinding[] {
     );
   } else if (
     identity.valid &&
+    identity.provenance === "GENERATED" &&
     exactPath &&
+    execution.integrity &&
     snapshotsConsistent &&
     completed &&
     environmentsMatch &&
@@ -295,113 +365,142 @@ export function compareRuns(input: ComparisonInput): ComparisonFinding[] {
     state = "PROBABLE_IMPACT";
   }
 
-  const displayedBase = behaviorOrExpected(
-    baseBehavior,
-    evaluatedIdentity.expected,
-  );
-  const displayedHead = behaviorOrExpected(
-    headBehavior,
-    evaluatedIdentity.expected,
-  );
+  if (state !== "CONFIRMED_REGRESSION" && limitations.length === 0) {
+    addLimitation(
+      limitations,
+      "Confirmation eligibility was not established from the supplied execution and evidence records.",
+    );
+  }
+
+  const displayedBase = behaviorOrExpected(baseBehavior, identity.expected);
+  const displayedHead = behaviorOrExpected(headBehavior, identity.expected);
+  const repeatCount = Math.min(execution.baseCount, execution.headCount);
   const repeatable =
-    comparisons.length >= 2 && !contradictory && validatedHeadDifference;
-  const factors = confidenceFactors({
-    differential: validatedHeadDifference,
-    exactTest: identity.valid && exactTestExecuted,
-    exactPath,
-    environmentsMatch,
-    currentEvidence: evidence.current,
-    repeatable,
-    repeatCount: comparisons.length,
-  });
-  const confidence: ComparisonConfidence = deepFreeze({
+    execution.integrity &&
+    repeatCount >= 2 &&
+    !contradictory &&
+    validatedHeadDifference;
+  const confidence: FindingConfidence = deepFreeze({
     level:
-      state === "CONFIRMED_REGRESSION" && comparisons.length >= 3
+      state === "CONFIRMED_REGRESSION" && repeatCount >= 3
         ? "HIGH"
         : state === "CONFIRMED_REGRESSION" || state === "CONFIRMED_CHANGE"
           ? "MEDIUM"
           : "LOW",
-    factors,
+    factors: confidenceFactors({
+      differential: validatedHeadDifference,
+      exactTest: identity.valid && exactTestExecuted,
+      exactPath,
+      environmentsMatch,
+      currentEvidence: evidence.current,
+      repeatable,
+      repeatCount,
+    }),
   });
 
   const findingEvidence = buildFindingEvidence(
-    input.evidenceItems,
+    evidence.items,
     revisions,
-    comparisons.length,
+    execution.baseCount,
+    execution.headCount,
   );
-  const proofCard = deepFreeze({
-    baseBehavior: describeBehavior(displayedBase),
-    headBehavior: describeBehavior(displayedHead),
-    evidenceIds: evidence.ids,
-    affectedJourney:
-      "Returning user → Restore session → Validate expired token",
-    reproductionCommand: `codeatlas replay ${input.findingId}`,
-    recommendedAction:
-      "Restore the unconditional expiration guard or accept the changed behavior with a contract update",
-    limitations: [...limitations],
-  });
-  const finding: Finding = {
-    id: input.findingId,
+  const finding: ComparisonFinding = {
+    id: findingId,
     state,
     title: "Expired sessions return an internal error",
     summary: `${describeBehavior(displayedBase)} changed to ${describeBehavior(displayedHead)} on the expired-session journey.`,
-    proofCard,
+    graphPath: path?.display ?? "restoreSession → validateToken",
+    confidence,
+    proofCard: {
+      baseBehavior: describeBehavior(displayedBase),
+      headBehavior: describeBehavior(displayedHead),
+      evidenceIds: evidence.ids,
+      affectedJourney:
+        "Returning user → Restore session → Validate expired token",
+      reproductionCommand: `codeatlas replay ${findingId}`,
+      recommendedAction:
+        "Restore the unconditional expiration guard or accept the changed behavior with a contract update",
+      limitations: [...limitations],
+    },
     evidence: findingEvidence,
   };
 
-  Object.defineProperties(finding, {
-    graphPath: {
-      value: path?.display ?? "restoreSession → validateToken",
-      enumerable: false,
-    },
-    confidence: { value: confidence, enumerable: false },
-  });
-
+  const parsed = FindingSchema.safeParse(finding);
+  if (!parsed.success) return frozenEmpty();
   return Object.freeze([
-    deepFreeze(finding as ComparisonFinding),
+    deepFreeze(parsed.data as ComparisonFinding),
   ]) as unknown as ComparisonFinding[];
 }
 
-function identifyTest(test: ComparedTest): TestIdentity {
-  if (test.provenance === "GENERATED") {
-    const { generatedTest, objective } = test;
-    return {
-      path: generatedTest.path,
-      objectiveId: generatedTest.objectiveId,
-      expected: { ...generatedTest.expectedBehavior },
-      evidenceIds: uniqueSorted([
-        ...generatedTest.evidenceIds,
-        ...objective.evidenceIds,
-      ]),
-      targetName: objective.targetSymbol,
-      entryPointName: objective.entryPoint,
-      valid:
-        generatedTest.generated === true &&
-        generatedTest.objectiveId === objective.id &&
-        generatedTest.path.length > 0,
-    };
-  }
-
-  return {
-    path: test.selection.path,
+function identifyTest(value: unknown): TestIdentity {
+  const invalid: TestIdentity = {
+    provenance: "GENERATED",
+    path: "",
     objectiveId: null,
     expected: null,
-    evidenceIds: [...test.selection.evidenceIds],
+    evidenceIds: [],
     targetName: "validateToken",
     entryPointName: "restoreSession",
-    valid: test.selection.testId.length > 0 && test.selection.path.length > 0,
+    valid: false,
   };
+  if (!isRecord(value)) return invalid;
+  if (value.provenance === "GENERATED") {
+    if (!isRecord(value.generatedTest) || !isRecord(value.objective)) {
+      return invalid;
+    }
+    const generatedTest = value.generatedTest;
+    const objective = value.objective;
+    const expected = parseBehavior(generatedTest.expectedBehavior);
+    const generatedEvidence = stringArray(generatedTest.evidenceIds);
+    const objectiveEvidence = stringArray(objective.evidenceIds);
+    const path = stringValue(generatedTest.path);
+    const objectiveId = stringValue(generatedTest.objectiveId);
+    const targetName = stringValue(objective.targetSymbol);
+    const entryPointName = stringValue(objective.entryPoint);
+    return {
+      provenance: "GENERATED",
+      path,
+      objectiveId: objectiveId || null,
+      expected,
+      evidenceIds: uniqueSorted([...generatedEvidence, ...objectiveEvidence]),
+      targetName: targetName || "validateToken",
+      entryPointName: entryPointName || "restoreSession",
+      valid:
+        generatedTest.generated === true &&
+        objectiveId.length > 0 &&
+        objectiveId === objective.id &&
+        path.length > 0 &&
+        expected !== null &&
+        targetName.length > 0 &&
+        entryPointName.length > 0,
+    };
+  }
+  if (value.provenance === "EXISTING" && isRecord(value.selection)) {
+    const path = stringValue(value.selection.path);
+    return {
+      provenance: "EXISTING",
+      path,
+      objectiveId: null,
+      expected: null,
+      evidenceIds: stringArray(value.selection.evidenceIds),
+      targetName: "validateToken",
+      entryPointName: "restoreSession",
+      valid: validIdentifier(value.selection.testId) && path.length > 0,
+    };
+  }
+  return invalid;
 }
 
 function expectedRevisions(
-  changedSymbols: readonly ChangedSymbol[],
+  values: readonly unknown[],
   targetName: string,
-): { baseSha: string; headSha: string; target: ChangedSymbol } | null {
-  const targets = changedSymbols.filter(
-    (symbol) =>
-      symbol.name === targetName &&
-      symbol.baseLocation !== null &&
-      symbol.headLocation !== null,
+): RevisionIdentity | null {
+  const targets = values.filter(
+    (value): value is ChangedSymbol =>
+      isChangedSymbol(value) &&
+      value.name === targetName &&
+      value.baseLocation !== null &&
+      value.headLocation !== null,
   );
   if (targets.length !== 1) return null;
   const target = targets[0]!;
@@ -413,54 +512,145 @@ function expectedRevisions(
 }
 
 function objectiveMatchesChange(
-  test: ComparedTest,
+  test: unknown,
   changedSymbol: ChangedSymbol,
 ): boolean {
+  if (!isRecord(test)) return false;
   if (test.provenance === "EXISTING") return true;
-  const { objective } = test;
+  if (test.provenance !== "GENERATED" || !isRecord(test.objective)) {
+    return false;
+  }
+  const source = test.objective.source;
   return (
-    objective.targetSymbol === changedSymbol.name &&
-    objective.source.path === changedSymbol.path &&
-    changedSymbol.headLocation?.snapshotSha === objective.source.snapshotSha &&
-    changedSymbol.changedLines.includes(objective.source.startLine)
+    isRecord(source) &&
+    test.objective.targetSymbol === changedSymbol.name &&
+    source.path === changedSymbol.path &&
+    changedSymbol.headLocation?.snapshotSha === source.snapshotSha &&
+    typeof source.startLine === "number" &&
+    changedSymbol.changedLines.includes(source.startLine)
   );
 }
 
 function resolveGraphPath(
-  edges: readonly SelectionEdge[],
+  values: readonly unknown[],
   entryPointName: string,
   targetName: string,
-): { display: string; targetId: string; evidenceIds: string[] } | null {
-  if (!Array.isArray(edges) || edges.length === 0) return null;
+): ResolvedPath | null {
+  if (values.length === 0) return null;
   const names: string[] = [];
   const evidenceIds: string[] = [];
   let priorTo: string | null = null;
-  for (const edge of edges) {
+  let targetId = "";
+  for (const value of values) {
     if (
-      typeof edge.from !== "string" ||
-      typeof edge.to !== "string" ||
-      typeof edge.fromName !== "string" ||
-      typeof edge.toName !== "string" ||
-      edge.relation !== "CALLS" ||
-      (priorTo !== null && edge.from !== priorTo)
+      !isRecord(value) ||
+      !validIdentifier(value.from) ||
+      !validIdentifier(value.to) ||
+      !validIdentifier(value.fromName) ||
+      !validIdentifier(value.toName) ||
+      value.relation !== "CALLS" ||
+      (priorTo !== null && value.from !== priorTo)
     ) {
       return null;
     }
-    if (names.length === 0) names.push(edge.fromName);
-    names.push(edge.toName);
-    evidenceIds.push(...(edge.evidenceIds ?? []));
-    priorTo = edge.to;
+    if (names.length === 0) names.push(value.fromName);
+    names.push(value.toName);
+    evidenceIds.push(...stringArray(value.evidenceIds));
+    priorTo = value.to;
+    targetId = value.to;
   }
   if (names[0] !== entryPointName || names.at(-1) !== targetName) return null;
   return {
     display: names.join(" → "),
-    targetId: edges.at(-1)!.to,
+    targetId,
     evidenceIds: uniqueSorted(evidenceIds),
   };
 }
 
+function runtimePairs(values: readonly unknown[]): RuntimePair[] {
+  return values.flatMap((value) =>
+    isRecord(value) && "base" in value && "head" in value
+      ? [{ base: value.base, head: value.head, reference: value }]
+      : [],
+  );
+}
+
+function assessExecutionBindings(
+  pairs: readonly RuntimePair[],
+): ExecutionAssessment {
+  const limitations: string[] = [];
+  const results = pairs.flatMap(({ base, head }) => [base, head]);
+  const malformed = results.some((result) => !isExecutionResultShape(result));
+  const invalidBinding = results.some(
+    (result) =>
+      isExecutionResultShape(result) && !hasValidExecutionResultBinding(result),
+  );
+  if (malformed) {
+    limitations.push(
+      "An execution result is malformed or missing run-bound identity.",
+    );
+  }
+  if (invalidBinding) {
+    limitations.push(
+      "An execution result digest does not match its run-bound result.",
+    );
+  }
+
+  const records = results.filter(
+    (result): result is ExecutionResult =>
+      isExecutionResultShape(result) && hasValidExecutionResultBinding(result),
+  );
+  const references = new Set(pairs.map(({ reference }) => reference));
+  const suppliedIds = results.flatMap((result) =>
+    isRecord(result) && typeof result.executionId === "string"
+      ? [result.executionId]
+      : [],
+  );
+  const suppliedDigests = results.flatMap((result) =>
+    isRecord(result) && typeof result.resultDigest === "string"
+      ? [result.resultDigest]
+      : [],
+  );
+  const duplicate =
+    references.size !== pairs.length ||
+    new Set(suppliedIds).size !== suppliedIds.length ||
+    new Set(suppliedDigests).size !== suppliedDigests.length;
+  if (duplicate) {
+    limitations.push(
+      "Each repeat must contain unique run-bound execution identities and result digests.",
+    );
+  }
+
+  const uniqueBase = uniqueBoundResults(
+    records.filter(({ revision }) => revision === "base"),
+  );
+  const uniqueHead = uniqueBoundResults(
+    records.filter(({ revision }) => revision === "head"),
+  );
+  return {
+    integrity:
+      !malformed &&
+      !invalidBinding &&
+      !duplicate &&
+      records.length === results.length,
+    baseCount: uniqueBase.length,
+    headCount: uniqueHead.length,
+    limitations,
+  };
+}
+
+function uniqueBoundResults(
+  values: readonly ExecutionResult[],
+): ExecutionResult[] {
+  const byBinding = new Map<string, ExecutionResult>();
+  for (const value of values) {
+    byBinding.set(`${value.executionId}\u0000${value.resultDigest}`, value);
+  }
+  return [...byBinding.values()];
+}
+
 function outcomeForPair(
-  pair: ExecutionComparison,
+  pair: { base: ExecutionResult; head: ExecutionResult },
   identity: TestIdentity,
 ): PairOutcome {
   const baseCases = matchingCases(pair.base, identity);
@@ -471,28 +661,6 @@ function outcomeForPair(
     baseObserved: matchingObservation(pair.base, baseCases[0]?.name, identity),
     headObserved: matchingObservation(pair.head, headCases[0]?.name, identity),
   };
-}
-
-function expectedFromObservations(
-  comparisons: readonly ExecutionComparison[],
-  identity: TestIdentity,
-): Behavior | null {
-  const expected = comparisons.map(({ head }) => {
-    const cases = matchingCases(head, identity);
-    if (cases.length !== 1) return null;
-    const observations = head.observations.filter(
-      (observation) => observation.testName === cases[0]!.name,
-    );
-    if (
-      observations.length !== 1 ||
-      !validBehavior(observations[0]!.expected)
-    ) {
-      return null;
-    }
-    return { ...observations[0]!.expected };
-  });
-  const repeated = repeatedBehavior(expected);
-  return typeof repeated === "object" && repeated !== null ? repeated : null;
 }
 
 function matchingCases(result: ExecutionResult, identity: TestIdentity) {
@@ -508,16 +676,20 @@ function matchingObservation(
   testName: string | undefined,
   identity: TestIdentity,
 ): Behavior | null {
-  if (testName === undefined) return null;
+  if (testName === undefined || identity.provenance !== "GENERATED")
+    return null;
   const observations = result.observations.filter(
-    (observation) => observation.testName === testName,
+    (observation) =>
+      observation.testName === testName &&
+      observation.path === identity.path &&
+      observation.generatedObjectiveId === identity.objectiveId,
   );
   if (observations.length !== 1) return null;
   const observation = observations[0]!;
   if (
     observation.source !== "TEST_ASSERTION" ||
-    (identity.expected !== null &&
-      !sameBehavior(observation.expected, identity.expected)) ||
+    identity.expected === null ||
+    !sameBehavior(observation.expected, identity.expected) ||
     !validBehavior(observation.actual)
   ) {
     return null;
@@ -544,22 +716,52 @@ function repeatedBehavior(
 }
 
 function assessEvidence(
-  items: readonly EvidenceItem[],
-  revisions: ReturnType<typeof expectedRevisions>,
+  value: unknown,
+  revisions: RevisionIdentity | null,
   identity: TestIdentity,
-  path: ReturnType<typeof resolveGraphPath>,
-): { current: boolean; ids: string[]; limitations: string[] } {
+  path: ResolvedPath | null,
+): EvidenceAssessment {
   const limitations: string[] = [];
-  const ids = uniqueSorted(items.map(({ id }) => id));
-  if (ids.length !== items.length) {
-    limitations.push("Cited evidence identifiers are duplicated.");
+  const rawItems = Array.isArray(value) ? value : [];
+  if (!Array.isArray(value)) {
+    limitations.push("Cited evidence is not an array.");
   }
-  if (items.some((item) => !ARTIFACT_DIGEST.test(item.artifactDigest))) {
+  if (
+    rawItems.some(
+      (item) =>
+        isRecord(item) && !ARTIFACT_DIGEST.test(String(item.artifactDigest)),
+    )
+  ) {
     limitations.push("Cited evidence has a malformed artifact digest.");
   }
-  if (items.some((item) => !EvidenceItemSchema.safeParse(item).success)) {
-    limitations.push("Cited evidence does not satisfy the evidence schema.");
+
+  const parsedItems: EvidenceItem[] = [];
+  for (const rawItem of rawItems) {
+    const parsed = EvidenceItemSchema.safeParse(rawItem);
+    if (parsed.success) parsedItems.push(parsed.data);
+    else
+      limitations.push("Cited evidence does not satisfy the evidence schema.");
   }
+
+  const groups = new Map<string, EvidenceItem[]>();
+  for (const item of parsedItems) {
+    const group = groups.get(item.id) ?? [];
+    group.push(item);
+    groups.set(item.id, group);
+  }
+  const items: EvidenceItem[] = [];
+  for (const id of [...groups.keys()].sort((left, right) =>
+    left.localeCompare(right),
+  )) {
+    const group = groups.get(id)!;
+    const canonical = uniqueSorted(group.map((item) => JSON.stringify(item)));
+    if (canonical.length > 1) {
+      limitations.push("Conflicting evidence records share an identifier.");
+    }
+    items.push(JSON.parse(canonical[0]!) as EvidenceItem);
+  }
+  const ids = items.map(({ id }) => id);
+
   if (
     revisions === null ||
     items.some(
@@ -582,8 +784,17 @@ function assessEvidence(
       "Required test, objective, or graph-path evidence is missing.",
     );
   }
-  if (!items.some((item) => item.type === "DIFFERENTIAL_EXECUTION")) {
+  const differential = items.filter(
+    (item) => item.type === "DIFFERENTIAL_EXECUTION",
+  );
+  if (differential.length === 0) {
     limitations.push("Differential execution evidence is missing.");
+  } else if (
+    differential.some(
+      ({ reproducibility }) => reproducibility !== "REPRODUCIBLE",
+    )
+  ) {
+    limitations.push("Differential execution evidence is not reproducible.");
   }
   if (
     !items.some(
@@ -596,33 +807,28 @@ function assessEvidence(
   return {
     current: limitations.length === 0,
     ids,
-    limitations,
+    items,
+    limitations: uniqueInOrder(limitations),
   };
 }
 
 function buildFindingEvidence(
   items: readonly EvidenceItem[],
-  revisions: ReturnType<typeof expectedRevisions>,
-  repeatCount: number,
+  revisions: RevisionIdentity | null,
+  baseCount: number,
+  headCount: number,
 ): FindingEvidence[] {
-  const fallbackSha = "0".repeat(40);
-  const baseSha = revisions?.baseSha ?? fallbackSha;
-  const headSha = revisions?.headSha ?? fallbackSha;
-  return deepFreeze(
-    [...items]
-      .sort((left, right) => left.id.localeCompare(right.id))
-      .map((item) => ({
-        id: item.id,
-        type: item.type,
-        reproducibility: item.reproducibility,
-        baseSha,
-        headSha,
-        executions:
-          item.type === "DIFFERENTIAL_EXECUTION"
-            ? { base: repeatCount, head: repeatCount }
-            : { base: 0, head: 0 },
-      })),
-  );
+  return items.map((item) => ({
+    id: item.id,
+    type: item.type,
+    reproducibility: item.reproducibility,
+    baseSha: revisions?.baseSha ?? FALLBACK_SHA,
+    headSha: revisions?.headSha ?? FALLBACK_SHA,
+    executions:
+      item.type === "DIFFERENTIAL_EXECUTION"
+        ? { base: baseCount, head: headCount }
+        : { base: 0, head: 0 },
+  }));
 }
 
 function confidenceFactors(input: {
@@ -633,24 +839,125 @@ function confidenceFactors(input: {
   currentEvidence: boolean;
   repeatable: boolean;
   repeatCount: number;
-}): string[] {
-  const factors: string[] = [];
+}): ConfidenceFactor[] {
+  const factors: ConfidenceFactor[] = [];
   if (input.differential) factors.push("DIFFERENTIAL_EXECUTION");
   if (input.exactTest) factors.push("EXACT_TEST_IDENTITY");
   if (input.exactPath) factors.push("EXACT_SYMBOL_PATH");
   if (input.environmentsMatch) factors.push("MATCHING_ENVIRONMENT");
   if (input.currentEvidence) factors.push("CURRENT_EVIDENCE");
   if (input.repeatable) {
-    factors.push(`REPEATABLE_${input.repeatCount}_OF_${input.repeatCount}`);
+    factors.push(
+      `REPEATABLE_${input.repeatCount}_OF_${input.repeatCount}` as ConfidenceFactor,
+    );
   }
+  if (factors.length === 0) factors.push("INSUFFICIENT_EVIDENCE");
   return factors;
+}
+
+function isExecutionResultShape(value: unknown): value is ExecutionResult {
+  return (
+    isRecord(value) &&
+    typeof value.executionId === "string" &&
+    (value.revision === "base" || value.revision === "head") &&
+    typeof value.snapshotSha === "string" &&
+    ["COMPLETED", "TIMED_OUT", "OUTPUT_LIMIT", "FAILED"].includes(
+      String(value.terminalState),
+    ) &&
+    (value.exitCode === null || Number.isInteger(value.exitCode)) &&
+    typeof value.durationMs === "number" &&
+    Number.isFinite(value.durationMs) &&
+    value.durationMs >= 0 &&
+    Array.isArray(value.testCases) &&
+    value.testCases.every(isTestCase) &&
+    Array.isArray(value.coverage) &&
+    value.coverage.every(isCoverageRecord) &&
+    Array.isArray(value.observations) &&
+    value.observations.every(isObservation) &&
+    typeof value.stdout === "string" &&
+    typeof value.stderr === "string" &&
+    typeof value.environmentDigest === "string" &&
+    typeof value.resultDigest === "string"
+  );
+}
+
+function isTestCase(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    validIdentifier(value.name) &&
+    validIdentifier(value.path) &&
+    ["PASSED", "FAILED", "SKIPPED"].includes(String(value.status)) &&
+    (value.failureMessage === null ||
+      typeof value.failureMessage === "string") &&
+    (value.generatedObjectiveId === null ||
+      typeof value.generatedObjectiveId === "string")
+  );
+}
+
+function isCoverageRecord(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    validIdentifier(value.path) &&
+    Array.isArray(value.coveredLines) &&
+    value.coveredLines.every((line) => Number.isInteger(line))
+  );
+}
+
+function isObservation(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    validIdentifier(value.testName) &&
+    validIdentifier(value.path) &&
+    (value.generatedObjectiveId === null ||
+      typeof value.generatedObjectiveId === "string") &&
+    value.source === "TEST_ASSERTION" &&
+    parseBehavior(value.expected) !== null &&
+    parseBehavior(value.actual) !== null
+  );
+}
+
+function isChangedSymbol(value: unknown): value is ChangedSymbol {
+  return (
+    isRecord(value) &&
+    validIdentifier(value.id) &&
+    validIdentifier(value.name) &&
+    typeof value.path === "string" &&
+    Array.isArray(value.changedLines) &&
+    value.changedLines.every((line) => Number.isInteger(line)) &&
+    (value.baseLocation === null || isSourceLocation(value.baseLocation)) &&
+    (value.headLocation === null || isSourceLocation(value.headLocation))
+  );
+}
+
+function isSourceLocation(
+  value: unknown,
+): value is ChangedSymbol["headLocation"] {
+  return (
+    isRecord(value) &&
+    typeof value.snapshotSha === "string" &&
+    typeof value.path === "string" &&
+    typeof value.startLine === "number" &&
+    typeof value.endLine === "number"
+  );
+}
+
+function parseBehavior(value: unknown): Behavior | null {
+  return isRecord(value) && validBehavior(value as unknown as Behavior)
+    ? { httpStatus: value.httpStatus as number, code: value.code as string }
+    : null;
+}
+
+function isBehavior(
+  value: Behavior | "CONTRADICTORY" | null,
+): value is Behavior {
+  return typeof value === "object" && value !== null;
 }
 
 function behaviorOrExpected(
   behavior: Behavior | "CONTRADICTORY" | null,
   expected: Behavior | null,
 ): Behavior | null {
-  return typeof behavior === "object" ? behavior : expected;
+  return isBehavior(behavior) ? behavior : expected;
 }
 
 function describeBehavior(behavior: Behavior | null): string {
@@ -677,8 +984,34 @@ function addLimitation(limitations: string[], limitation: string): void {
   if (!limitations.includes(limitation)) limitations.push(limitation);
 }
 
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => validIdentifier(item))
+    : [];
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function validIdentifier(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
 function uniqueSorted(values: readonly string[]): string[] {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
+}
+
+function uniqueInOrder(values: readonly string[]): string[] {
+  return [...new Set(values)];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function frozenEmpty(): ComparisonFinding[] {
+  return Object.freeze([]) as unknown as ComparisonFinding[];
 }
 
 function deepFreeze<T>(value: T): T {

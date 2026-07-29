@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import type { ChangedSymbol } from "@codeatlas/analyzer";
@@ -8,7 +7,10 @@ import {
   type Finding,
 } from "@codeatlas/evidence";
 import type { GeneratedTest, TestObjective } from "@codeatlas/generator";
-import type { ExecutionResult } from "@codeatlas/runner";
+import {
+  computeExecutionResultDigest,
+  type ExecutionResult,
+} from "@codeatlas/runner";
 import type { SelectionEdge } from "@codeatlas/selector";
 
 import { compareRuns, type ComparisonInput } from "../src/index.js";
@@ -174,6 +176,7 @@ describe("compareRuns", () => {
   ])("keeps $name unverified", ({ mutate, limitation }) => {
     const input = structuredClone(comparison()) as MutableComparison;
     mutate(input);
+    rebind(input);
 
     const [finding] = compareRuns(input);
 
@@ -201,6 +204,7 @@ describe("compareRuns", () => {
   it("fails closed when a run is bound to the wrong revision snapshot", () => {
     const input = structuredClone(comparison()) as MutableComparison;
     input.comparisons[0]!.base.snapshotSha = headSha;
+    rebind(input);
 
     const [finding] = compareRuns(input);
 
@@ -217,6 +221,7 @@ describe("compareRuns", () => {
       pair.head.exitCode = 0;
       pair.head.observations = [];
     }
+    rebind(input);
 
     const [finding] = compareRuns(input);
 
@@ -242,6 +247,7 @@ describe("compareRuns", () => {
         },
       ];
     }
+    rebind(input);
 
     const [finding] = compareRuns(input);
 
@@ -272,6 +278,7 @@ describe("compareRuns", () => {
       pair.base.testCases[0]!.generatedObjectiveId = null;
       pair.head.testCases[0]!.generatedObjectiveId = null;
     }
+    rebind(input);
 
     const [finding] = compareRuns(input);
 
@@ -301,6 +308,7 @@ describe("compareRuns", () => {
       for (const pair of input.comparisons) {
         mutate(pair.head.observations[0]!);
       }
+      rebind(input);
 
       const [finding] = compareRuns(input);
 
@@ -368,6 +376,7 @@ describe("compareRuns", () => {
       pair.base.exitCode = 1;
       pair.base.observations = structuredClone(pair.head.observations);
     }
+    rebind(input);
 
     const [finding] = compareRuns(input);
 
@@ -400,6 +409,17 @@ describe("compareRuns", () => {
       name: "a malformed evidence member",
       mutate(input: Record<string, unknown>) {
         input.evidenceItems = [null, ...(input.evidenceItems as unknown[])];
+      },
+    },
+    {
+      name: "a malformed nested test case",
+      mutate(input: Record<string, unknown>) {
+        const pair = (
+          input.comparisons as Array<{
+            base: Record<string, unknown>;
+          }>
+        )[0]!;
+        pair.base.testCases = [null];
       },
     },
   ])("returns a frozen unverified finding for $name", ({ mutate }) => {
@@ -514,7 +534,7 @@ function execution(
   repeat: number,
 ): ExecutionResult {
   const result = {
-    executionId: `execution:${revision}:${repeat}`,
+    executionId: executionId(revision, repeat),
     revision,
     snapshotSha: revision === "base" ? baseSha : headSha,
     terminalState: "COMPLETED",
@@ -549,14 +569,23 @@ function execution(
   };
   return {
     ...result,
-    resultDigest: digestResult(result),
+    resultDigest: computeExecutionResultDigest(result),
   };
 }
 
-function digestResult(result: object): string {
-  return `sha256:${createHash("sha256")
-    .update(JSON.stringify(result), "utf8")
-    .digest("hex")}`;
+function executionId(revision: "base" | "head", repeat: number): string {
+  const variant = revision === "base" ? "8" : "9";
+  return `00000000-0000-4000-${variant}000-${String(repeat + 1).padStart(12, "0")}`;
+}
+
+function rebind(input: MutableComparison): void {
+  for (const pair of input.comparisons) {
+    for (const result of [pair.base, pair.head]) {
+      const { resultDigest: _resultDigest, ...boundResult } = result;
+      void _resultDigest;
+      result.resultDigest = computeExecutionResultDigest(boundResult);
+    }
+  }
 }
 
 function evidence(

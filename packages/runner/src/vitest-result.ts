@@ -129,6 +129,8 @@ export function parseVitestResult(
         if (actual !== null) {
           observations.push({
             testName: name,
+            path,
+            generatedObjectiveId: generatedFile.objectiveId,
             source: "TEST_ASSERTION",
             expected: generatedFile.expectedBehavior,
             actual,

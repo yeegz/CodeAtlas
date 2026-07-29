@@ -16,6 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { canonicalize } from "json-canonicalize";
 import { describe, expect, it } from "vitest";
 import { computeSnapshotDigest } from "../../analyzer/src/index.js";
 import {
@@ -37,8 +38,9 @@ function executionResultDigest(
   result: ExecutionResult & { resultDigest: string },
 ): string {
   const { resultDigest: _resultDigest, ...canonicalResult } = result;
+  void _resultDigest;
   return `sha256:${createHash("sha256")
-    .update(JSON.stringify(canonicalResult), "utf8")
+    .update(canonicalize(canonicalResult), "utf8")
     .digest("hex")}`;
 }
 

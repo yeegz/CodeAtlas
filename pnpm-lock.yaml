@@ -110,6 +110,9 @@ importers:
       execa:
         specifier: 9.6.0
         version: 9.6.0
+      json-canonicalize:
+        specifier: 2.0.0
+        version: 2.0.0
       typescript:
         specifier: 5.9.3
         version: 5.9.3

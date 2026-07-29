@@ -53,6 +53,25 @@ export const FindingStateSchema = z.enum([
   "ACCEPTED_CHANGE",
 ]);
 
+export const ConfidenceFactorSchema = z.union([
+  z.enum([
+    "DIFFERENTIAL_EXECUTION",
+    "EXACT_TEST_IDENTITY",
+    "EXACT_SYMBOL_PATH",
+    "MATCHING_ENVIRONMENT",
+    "CURRENT_EVIDENCE",
+    "INSUFFICIENT_EVIDENCE",
+  ]),
+  z.string().regex(/^REPEATABLE_[1-9][0-9]*_OF_[1-9][0-9]*$/),
+]);
+
+export const FindingConfidenceSchema = z
+  .strictObject({
+    level: z.enum(["HIGH", "MEDIUM", "LOW"]),
+    factors: z.array(ConfidenceFactorSchema).min(1).readonly(),
+  })
+  .readonly();
+
 export const SourceLocationSchema = z
   .strictObject({
     snapshotSha: z.string().regex(/^[0-9a-f]{40}$/),
@@ -129,6 +148,8 @@ export const FindingSchema = z
     state: FindingStateSchema,
     title: z.string().min(1),
     summary: z.string().min(1),
+    graphPath: z.string().min(1).optional(),
+    confidence: FindingConfidenceSchema.optional(),
     proofCard: ProofCardSchema,
     evidence: z.array(FindingEvidenceSchema),
   })
@@ -368,6 +389,8 @@ export const EvidenceManifestSchema = z
 export type EvidenceType = z.infer<typeof EvidenceTypeSchema>;
 export type GraphRelation = z.infer<typeof GraphRelationSchema>;
 export type FindingState = z.infer<typeof FindingStateSchema>;
+export type ConfidenceFactor = z.infer<typeof ConfidenceFactorSchema>;
+export type FindingConfidence = z.infer<typeof FindingConfidenceSchema>;
 export type SourceLocation = z.infer<typeof SourceLocationSchema>;
 export type EvidenceItem = z.infer<typeof EvidenceItemSchema>;
 export type GraphNode = z.infer<typeof GraphNodeSchema>;

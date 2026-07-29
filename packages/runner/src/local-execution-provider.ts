@@ -40,6 +40,7 @@ import type {
   ExecutionRequest,
   ExecutionResult,
 } from "./execution-provider.js";
+import { computeExecutionResultDigest } from "./execution-result-digest.js";
 import {
   parseVitestResult,
   requiresStructuredReporter,
@@ -467,7 +468,8 @@ function buildResult(
   startedAt: number,
   values: BuildResultValues,
 ): ExecutionResult {
-  return {
+  const result = {
+    executionId: randomUUID(),
     revision: request.revision,
     snapshotSha: request.snapshotSha,
     terminalState: values.terminalState,
@@ -482,6 +484,7 @@ function buildResult(
     stderr: values.stderr,
     environmentDigest: runtime.environmentDigest,
   };
+  return { ...result, resultDigest: computeExecutionResultDigest(result) };
 }
 
 async function resolveSnapshotRoot(candidate: string): Promise<string> {
