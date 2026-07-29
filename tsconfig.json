@@ -4,6 +4,7 @@
   "references": [
     { "path": "./packages/evidence" },
     { "path": "./packages/analyzer" },
-    { "path": "./packages/selector" }
+    { "path": "./packages/selector" },
+    { "path": "./packages/runner" }
   ]
 }
