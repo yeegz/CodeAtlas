@@ -12,7 +12,7 @@ import { EvidenceManifestSchema, type EvidenceManifest } from "./schema.js";
 const DigestSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/);
 const Base64UrlSchema = z.string().regex(/^[A-Za-z0-9_-]+$/);
 
-const SignedManifestSchema = z.object({
+const SignedManifestSchema = z.strictObject({
   manifest: EvidenceManifestSchema,
   digest: DigestSchema,
   signature: Base64UrlSchema,

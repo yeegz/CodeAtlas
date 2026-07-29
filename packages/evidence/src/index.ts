@@ -1,8 +1,10 @@
 export {
+  AnalysisIdentityInputSchema,
   ChangePassportSchema,
   EvidenceItemSchema,
   EvidenceManifestSchema,
   EvidenceTypeSchema,
+  FindingEvidenceSchema,
   FindingSchema,
   FindingStateSchema,
   GraphEdgeSchema,
@@ -10,10 +12,14 @@ export {
   GraphRelationSchema,
   ProofCardSchema,
   SourceLocationSchema,
+  TestExecutionSchema,
+  deriveAnalysisId,
+  type AnalysisIdentityInput,
   type ChangePassport,
   type EvidenceItem,
   type EvidenceManifest,
   type EvidenceType,
+  type FindingEvidence,
   type Finding,
   type FindingState,
   type GraphEdge,
@@ -21,5 +27,6 @@ export {
   type GraphRelation,
   type ProofCard,
   type SourceLocation,
+  type TestExecution,
 } from "./schema.js";
 export { signManifest, verifyManifest } from "./manifest.js";
