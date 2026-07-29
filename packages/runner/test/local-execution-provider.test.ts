@@ -246,6 +246,35 @@ describe("LocalExecutionProvider", () => {
     ]);
   }, 20_000);
 
+  it("fails closed when a generated assertion imports a non-Vitest expect", async () => {
+    const fixtureRoot = await createSnapshot({
+      "package.json": '{"private":true,"type":"module"}\n',
+      "src/no-op-expect.ts":
+        "export function expect(_actual: unknown) { return { toEqual(_expected: unknown) {} }; }\n",
+    });
+    try {
+      const provider = new LocalExecutionProvider({ workspaceRoot });
+      const result = await provider.run({
+        ...(await snapshotRequest(fixtureRoot, [])),
+        generatedFiles: [
+          {
+            ...generatedFile("test/custom-expect.generated.test.ts"),
+            content:
+              'import { expect } from "../src/no-op-expect.ts";\nimport { it } from "vitest";\nit("cannot forge a passing assertion", () => {\n  const response = { status: 599, body: { code: "FORGED" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "EXPECTED" });\n});\n',
+            objectiveId: "custom-expect",
+            expectedBehavior: { httpStatus: 401, code: "EXPECTED" },
+          },
+        ],
+      });
+
+      expect(result.terminalState, JSON.stringify(result)).toBe("FAILED");
+      expect(result.testCases).toMatchObject([{ status: "PASSED" }]);
+      expect(result.observations).toEqual([]);
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it("does not emit an observation for a hand-thrown forged AssertionError", async () => {
     const provider = new LocalExecutionProvider({ workspaceRoot });
     const result = await provider.run({
@@ -624,6 +653,38 @@ describe("LocalExecutionProvider", () => {
     }
   });
 
+  it("does not let a linux option bypass an injected win32 host boundary", async () => {
+    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
+    try {
+      const fake = await createFakePnpm(fakeRoot, {
+        body: `const cwd = process.cwd();\nwriteResult({ testResults: [suite(resolve(cwd, "test/auth.test.ts"))], coverageMap: {} });`,
+      });
+      const ProviderWithHostInjection =
+        LocalExecutionProvider as unknown as new (
+          options: LocalExecutionProviderOptions,
+          internal: { platform: NodeJS.Platform },
+        ) => LocalExecutionProvider;
+      const provider = new ProviderWithHostInjection(
+        {
+          workspaceRoot,
+          pnpmPath: fake.cliPath,
+          platform: "linux",
+        },
+        { platform: "win32" },
+      );
+      const result = await provider.run(request("base"));
+
+      expect(result.terminalState).toBe("FAILED");
+      expect(result.exitCode).toBeNull();
+      expect(result.stderr).toMatch(/win32|unsupported platform/iu);
+      await expect(access(fake.counterPath)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
   it("rejects option-shaped selected and generated paths before launch", async () => {
     const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
     try {
@@ -806,6 +867,28 @@ describe("LocalExecutionProvider", () => {
 
       expect(result.stdout).toContain("posix before <absolute-path>");
       expect(result.stdout).toContain("windows before <absolute-path>");
+      expect(result.stdout).not.toContain("folder with spaces");
+      expect(result.stdout).not.toContain("file.ts");
+      expect(result.stdout).not.toContain("after-marker");
+    } finally {
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("redacts delimiter-adjacent absolute paths while preserving labels", async () => {
+    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
+    try {
+      const fake = await createFakePnpm(fakeRoot, {
+        body: `console.log("posix:/tmp/folder with spaces/file.ts after-marker");\nconsole.log("windows:C:\\\\Temp\\\\folder with spaces\\\\file.ts after-marker");\nwriteResult("{ malformed");`,
+      });
+      const provider = new LocalExecutionProvider({
+        workspaceRoot,
+        pnpmPath: fake.cliPath,
+      });
+      const result = await provider.run(request("base"));
+
+      expect(result.stdout).toContain("posix:<absolute-path>");
+      expect(result.stdout).toContain("windows:<absolute-path>");
       expect(result.stdout).not.toContain("folder with spaces");
       expect(result.stdout).not.toContain("file.ts");
       expect(result.stdout).not.toContain("after-marker");
