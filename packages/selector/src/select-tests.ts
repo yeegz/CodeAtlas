@@ -1,4 +1,8 @@
-import type { ChangedSymbol, SnapshotAnalysis } from "@codeatlas/analyzer";
+import type {
+  AnalyzedEdge,
+  ChangedSymbol,
+  SnapshotAnalysis,
+} from "@codeatlas/analyzer";
 
 const MAX_PATH_EDGES = 8;
 const REACHABLE_RELATIONS = new Set(["CALLS", "IMPORTS", "TESTS"]);
@@ -15,6 +19,7 @@ export interface SelectionEdge {
   from: string;
   to: string;
   relation: string;
+  evidenceType?: AnalyzedEdge["evidenceType"];
   evidenceIds?: readonly string[];
   fromName?: string;
   toName?: string;
@@ -38,13 +43,14 @@ export interface TestSelection {
 export interface TestExclusion {
   testId: string;
   excluded: true;
-  reason: "NO_REACHABLE_CHANGED_SYMBOL";
+  reason: "AI_INFERENCE_PATH_ONLY" | "NO_REACHABLE_CHANGED_SYMBOL";
 }
 
 interface ValidEdge {
   from: string;
   to: string;
   relation: ReachableRelation;
+  evidenceType?: AnalyzedEdge["evidenceType"];
   evidenceIds: string[];
   fromName?: string;
   toName?: string;
@@ -82,15 +88,22 @@ export function explainExclusion(
   }
   return selectTests(input).some((selection) => selection.testId === testId)
     ? undefined
-    : { testId, excluded: true, reason: "NO_REACHABLE_CHANGED_SYMBOL" };
+    : {
+        testId,
+        excluded: true,
+        reason: findReaches(input, validTests(input.tests), true).has(testId)
+          ? "AI_INFERENCE_PATH_ONLY"
+          : "NO_REACHABLE_CHANGED_SYMBOL",
+      };
 }
 
 function findReaches(
   input: TestSelectionInput,
   tests: readonly TestCandidate[],
+  includeAiInference = false,
 ): Map<string, Reach> {
   const testIds = new Set(tests.map((test) => test.id));
-  const reverseEdges = reverseAdjacency(input.edges);
+  const reverseEdges = reverseAdjacency(input.edges, includeAiInference);
   const changedIds = uniqueStrings(input.changedSymbolIds).sort();
   const reaches = new Map<string, Reach>();
   const visited = new Map<string, number>();
@@ -126,11 +139,16 @@ function findReaches(
 
 function reverseAdjacency(
   edges: readonly SelectionEdge[],
+  includeAiInference: boolean,
 ): Map<string, ValidEdge[]> {
   const adjacency = new Map<string, ValidEdge[]>();
   for (const edge of edges) {
     const normalized = normalizeEdge(edge);
-    if (!normalized) continue;
+    if (
+      !normalized ||
+      (!includeAiInference && normalized.evidenceType === "AI_INFERENCE")
+    )
+      continue;
     const bucket = adjacency.get(normalized.to) ?? [];
     bucket.push(normalized);
     adjacency.set(normalized.to, bucket);
@@ -150,6 +168,9 @@ function normalizeEdge(edge: SelectionEdge): ValidEdge | undefined {
     from: edge.from,
     to: edge.to,
     relation: edge.relation as ReachableRelation,
+    ...(typeof edge.evidenceType === "string"
+      ? { evidenceType: edge.evidenceType }
+      : {}),
     evidenceIds: uniqueStrings(edge.evidenceIds ?? []),
     ...(typeof edge.fromName === "string" && edge.fromName
       ? { fromName: edge.fromName }

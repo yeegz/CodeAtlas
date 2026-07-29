@@ -165,3 +165,76 @@ it("excludes paths longer than eight edges", () => {
 
   expect(selections).toEqual([]);
 });
+
+it("excludes an AI-inference-only path with its own explanation", () => {
+  const input = {
+    changedSymbolIds: ["symbol:changed"],
+    tests: [{ id: "test:ai-only", path: "test/ai-only.test.ts" }],
+    edges: [
+      {
+        from: "symbol:inferredCaller",
+        to: "symbol:changed",
+        relation: "CALLS",
+        evidenceType: "AI_INFERENCE" as const,
+        evidenceIds: ["ev:inferred-call"],
+      },
+      {
+        from: "test:ai-only",
+        to: "symbol:inferredCaller",
+        relation: "TESTS",
+        evidenceIds: ["ev:test"],
+      },
+    ],
+  };
+
+  expect(selectTests(input)).toEqual([]);
+  expect(explainExclusion("test:ai-only", input)).toEqual({
+    testId: "test:ai-only",
+    excluded: true,
+    reason: "AI_INFERENCE_PATH_ONLY",
+  });
+});
+
+it("selects a static path when an AI-inference path exists in parallel", () => {
+  const selections = selectTests({
+    changedSymbolIds: ["symbol:changed"],
+    tests: [{ id: "test:mixed", path: "test/mixed.test.ts" }],
+    edges: [
+      {
+        from: "symbol:inferredCaller",
+        to: "symbol:changed",
+        relation: "CALLS",
+        evidenceType: "AI_INFERENCE",
+        evidenceIds: ["ev:inferred-call"],
+      },
+      {
+        from: "test:mixed",
+        to: "symbol:inferredCaller",
+        relation: "TESTS",
+        evidenceIds: ["ev:inferred-test"],
+      },
+      {
+        from: "symbol:staticCaller",
+        to: "symbol:changed",
+        relation: "CALLS",
+        evidenceType: "STATIC_CALLGRAPH",
+        evidenceIds: ["ev:static-call"],
+      },
+      {
+        from: "test:mixed",
+        to: "symbol:staticCaller",
+        relation: "TESTS",
+        evidenceIds: ["ev:static-test"],
+      },
+    ],
+  });
+
+  expect(selections).toEqual([
+    {
+      testId: "test:mixed",
+      path: "test/mixed.test.ts",
+      reasons: ["Calls staticCaller(), which reaches changed changed()."],
+      evidenceIds: ["ev:static-test", "ev:static-call"],
+    },
+  ]);
+});
