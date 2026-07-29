@@ -129,6 +129,11 @@ export const ProofCardSchema = z.strictObject({
   limitations: z.array(z.string().min(1)),
 });
 
+const EvidenceFreeUnverifiedProofCardSchema = ProofCardSchema.extend({
+  evidenceIds: z.array(IdentifierSchema).length(0),
+  limitations: z.array(z.string().min(1)).min(1),
+});
+
 export const FindingEvidenceSchema = z.strictObject({
   id: IdentifierSchema,
   type: EvidenceTypeSchema,
@@ -150,10 +155,23 @@ export const FindingSchema = z
     summary: z.string().min(1),
     graphPath: z.string().min(1).optional(),
     confidence: FindingConfidenceSchema.optional(),
-    proofCard: ProofCardSchema,
+    proofCard: z.union([
+      ProofCardSchema,
+      EvidenceFreeUnverifiedProofCardSchema,
+    ]),
     evidence: z.array(FindingEvidenceSchema),
   })
   .superRefine((finding, context) => {
+    if (
+      finding.proofCard.evidenceIds.length === 0 &&
+      finding.state !== "UNVERIFIED"
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["proofCard", "evidenceIds"],
+        message: "only unverified findings may omit evidence citations",
+      });
+    }
     const evidenceById = new Map(
       finding.evidence.map((evidence) => [evidence.id, evidence]),
     );

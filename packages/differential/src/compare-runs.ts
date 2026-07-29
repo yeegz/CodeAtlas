@@ -253,7 +253,6 @@ export function compareRuns(input: ComparisonInput): ComparisonFinding[] {
   for (const limitation of evidence.limitations) {
     addLimitation(limitations, limitation);
   }
-  if (evidence.items.length === 0) return frozenEmpty();
 
   const baseStatuses = pairOutcomes.map(({ baseStatus }) => baseStatus);
   const headStatuses = pairOutcomes.map(({ headStatus }) => headStatus);
@@ -741,6 +740,11 @@ function assessEvidence(
     if (parsed.success) parsedItems.push(parsed.data);
     else
       limitations.push("Cited evidence does not satisfy the evidence schema.");
+  }
+  if (parsedItems.length === 0) {
+    limitations.push(
+      "No usable evidence items were provided for this finding.",
+    );
   }
 
   const groups = new Map<string, EvidenceItem[]>();
