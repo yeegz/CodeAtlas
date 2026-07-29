@@ -112,7 +112,7 @@ describe("LocalExecutionProvider", () => {
     } finally {
       await rm(temporaryParent, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it("stops a real Vitest run at the aggregate output cap and cleans up", async () => {
     const temporaryParent = await mkdtemp(
@@ -269,7 +269,10 @@ describe("LocalExecutionProvider", () => {
     expect(result.testCases).toMatchObject([
       { status: "FAILED", generatedObjectiveId: "full-observation" },
     ]);
-    expect(result.observations).toEqual([
+    expect(
+      result.observations,
+      result.testCases[0]?.failureMessage ?? JSON.stringify(result),
+    ).toEqual([
       {
         testName: "records the complete actual response",
         source: "TEST_ASSERTION",
@@ -312,13 +315,15 @@ describe("generated: expired session regression", () => {
     expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
     expect(result.testCases).toMatchObject([
       {
-        name:
-          "generated: expired session regression returns SESSION_EXPIRED for a non-refreshable expired token",
+        name: "generated: expired session regression returns SESSION_EXPIRED for a non-refreshable expired token",
         status: "FAILED",
         generatedObjectiveId: "expired-session-objective",
       },
     ]);
-    expect(result.observations).toEqual([
+    expect(
+      result.observations,
+      result.testCases[0]?.failureMessage ?? JSON.stringify(result),
+    ).toEqual([
       {
         testName:
           "generated: expired session regression returns SESSION_EXPIRED for a non-refreshable expired token",
@@ -347,31 +352,35 @@ describe("generated: expired session regression", () => {
     });
   });`,
     },
-  ])("does not trust a describe wrapper containing $name", async ({ body }) => {
-    const provider = new LocalExecutionProvider({ workspaceRoot });
-    const result = await provider.run({
-      ...request("base"),
-      testPaths: [],
-      generatedFiles: [
-        {
-          ...generatedFile("test/unsupported-describe.generated.test.ts"),
-          content: `import { describe, expect, it } from "vitest";
+  ])(
+    "does not trust a describe wrapper containing $name",
+    async ({ body }) => {
+      const provider = new LocalExecutionProvider({ workspaceRoot });
+      const result = await provider.run({
+        ...request("base"),
+        testPaths: [],
+        generatedFiles: [
+          {
+            ...generatedFile("test/unsupported-describe.generated.test.ts"),
+            content: `import { describe, expect, it } from "vitest";
 describe("generated wrapper", () => {
   ${body}
 });
 `,
-          objectiveId: "unsupported-describe",
-          expectedBehavior: {
-            httpStatus: 401,
-            code: "SESSION_EXPIRED",
+            objectiveId: "unsupported-describe",
+            expectedBehavior: {
+              httpStatus: 401,
+              code: "SESSION_EXPIRED",
+            },
           },
-        },
-      ],
-    });
+        ],
+      });
 
-    expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
-    expect(result.observations).toEqual([]);
-  }, 20_000);
+      expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+      expect(result.observations).toEqual([]);
+    },
+    20_000,
+  );
 
   it("preserves snapshot Vitest configuration while collecting observations", async () => {
     const fixtureRoot = await createSnapshot({
@@ -379,18 +388,37 @@ describe("generated wrapper", () => {
       "vitest.config.ts":
         'export default { test: { setupFiles: ["./test/setup.ts"] } };\n',
       "src/source.ts": "export const value = 1;\n",
-      "test/setup.ts": "globalThis.fixtureSetupRan = true;\n",
-      "test/config.test.ts":
-        'import { expect, it } from "vitest";\nit("uses snapshot setup", () => { expect(globalThis.fixtureSetupRan).toBe(true); });\n',
+      "test/setup.ts":
+        'globalThis.fixtureResponse = { status: 401, body: { code: "SESSION_EXPIRED" } };\n',
     });
     try {
       const provider = new LocalExecutionProvider({ workspaceRoot });
-      const result = await provider.run(
-        await snapshotRequest(fixtureRoot, ["test/config.test.ts"]),
-      );
+      const result = await provider.run({
+        ...(await snapshotRequest(fixtureRoot, [])),
+        generatedFiles: [
+          {
+            ...generatedFile("test/config.generated.test.ts"),
+            content:
+              'import { expect, it } from "vitest";\nit("uses snapshot setup", () => {\n  const response = globalThis.fixtureResponse;\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "SESSION_EXPIRED" });\n});\n',
+            objectiveId: "config-preservation",
+            expectedBehavior: {
+              httpStatus: 401,
+              code: "SESSION_EXPIRED",
+            },
+          },
+        ],
+      });
 
       expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
-      expect(result.testCases).toMatchObject([{ status: "PASSED" }]);
+      expect(result.testCases).toMatchObject([
+        { status: "PASSED", generatedObjectiveId: "config-preservation" },
+      ]);
+      expect(result.observations).toMatchObject([
+        {
+          expected: { httpStatus: 401, code: "SESSION_EXPIRED" },
+          actual: { httpStatus: 401, code: "SESSION_EXPIRED" },
+        },
+      ]);
     } finally {
       await rm(fixtureRoot, { recursive: true, force: true });
     }
@@ -508,6 +536,30 @@ describe("generated wrapper", () => {
             'import { it } from "vitest";\nit("throws an identical forged assertion", () => {\n  throw Object.assign(new Error(\'expected { httpStatus: 599, code: "FORGED" } to deeply equal { httpStatus: 401, code: "EXPECTED" }\'), { name: "AssertionError" });\n});\n',
           objectiveId: "forged-assertion",
           expectedBehavior: { httpStatus: 401, code: "EXPECTED" },
+        },
+      ],
+    });
+
+    expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+    expect(result.testCases).toMatchObject([{ status: "FAILED" }]);
+    expect(result.observations).toEqual([]);
+  }, 20_000);
+
+  it("does not accept structured fields thrown before the generated matcher", async () => {
+    const provider = new LocalExecutionProvider({ workspaceRoot });
+    const result = await provider.run({
+      ...request("base"),
+      testPaths: [],
+      generatedFiles: [
+        {
+          ...generatedFile("test/pre-matcher-forgery.generated.test.ts"),
+          content:
+            'import { expect, it } from "vitest";\nit("cannot forge before the matcher", () => {\n  const response = { get status() { throw Object.assign(new Error("forged"), { name: "AssertionError", actual: \'{ "httpStatus": 599, "code": "FORGED" }\', expected: \'{ "httpStatus": 401, "code": "SESSION_EXPIRED" }\' }); }, body: { code: "FORGED" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "SESSION_EXPIRED" });\n});\n',
+          objectiveId: "pre-matcher-forgery",
+          expectedBehavior: {
+            httpStatus: 401,
+            code: "SESSION_EXPIRED",
+          },
         },
       ],
     });

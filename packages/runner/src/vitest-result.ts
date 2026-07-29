@@ -114,9 +114,10 @@ export function parseVitestResult(
         const actual =
           status === "PASSED"
             ? generatedFile.expectedBehavior
-            : parseActualBehavior(failureMessages.join("\n"), {
+            : parseActualBehavior(assertion, failureMessages.join("\n"), {
                 path,
                 line: generatedAssertion.line,
+                column: generatedAssertion.column,
                 expected: generatedFile.expectedBehavior,
               });
         if (actual !== null) {
@@ -322,14 +323,25 @@ function parseStatus(value: unknown): "PASSED" | "FAILED" | "SKIPPED" | null {
 }
 
 function parseActualBehavior(
+  assertionResult: UnknownRecord,
   message: string,
   binding: {
     path: string;
     line: number;
+    column: number;
     expected: { httpStatus: number; code: string };
   },
 ): { httpStatus: number; code: string } | null {
-  if (!failureBindsToAssertion(message, binding.path, binding.line))
+  const structured = parseStructuredActualBehavior(assertionResult, binding);
+  if (structured !== null) return structured;
+  if (
+    !failureBindsToAssertion(
+      message,
+      binding.path,
+      binding.line,
+      binding.column,
+    )
+  )
     return null;
   const assertion =
     /^AssertionError:\s+expected\s+(\{[^\n]*\})\s+to\s+(?:deeply\s+)?(?:equal|be)\s+(\{[^\n]*\})/u.exec(
@@ -345,15 +357,74 @@ function parseActualBehavior(
     : null;
 }
 
+function parseStructuredActualBehavior(
+  assertionResult: UnknownRecord,
+  binding: {
+    path: string;
+    line: number;
+    column: number;
+    expected: { httpStatus: number; code: string };
+  },
+): { httpStatus: number; code: string } | null {
+  const details = assertionResult.failureDetails;
+  if (!Array.isArray(details) || details.length !== 1) return null;
+  const detail = details[0];
+  if (
+    !isRecord(detail) ||
+    typeof detail.stack !== "string" ||
+    !failureBindsToAssertion(
+      detail.stack,
+      binding.path,
+      binding.line,
+      binding.column,
+    )
+  ) {
+    return null;
+  }
+  const actual = behaviorValue(detail.actual);
+  const expected = behaviorValue(detail.expected);
+  return actual !== null &&
+    expected?.httpStatus === binding.expected.httpStatus &&
+    expected.code === binding.expected.code
+    ? actual
+    : null;
+}
+
+function behaviorValue(
+  value: unknown,
+): { httpStatus: number; code: string } | null {
+  if (typeof value === "string") return parseSerializedBehavior(value);
+  if (!isRecord(value) || Object.keys(value).length !== 2) return null;
+  return typeof value.httpStatus === "number" &&
+    Number.isFinite(value.httpStatus) &&
+    typeof value.code === "string"
+    ? { httpStatus: value.httpStatus, code: value.code }
+    : null;
+}
+
 interface GeneratedAssertion {
   testName: string;
   line: number;
+  column: number;
+}
+
+interface DirectGeneratedTest {
+  testCall: ts.CallExpression;
+  wrapperCallback: ts.ArrowFunction | ts.FunctionExpression | null;
 }
 
 type GeneratedAssertionValidation =
   | { kind: "valid"; assertion: GeneratedAssertion }
   | { kind: "invalid-provenance" }
   | { kind: "unsupported" };
+
+export function requiresStructuredReporter(
+  files: ExecutionRequest["generatedFiles"],
+): boolean {
+  return files.some(
+    (file) => validateGeneratedAssertion(file).kind === "valid",
+  );
+}
 
 function validateGeneratedAssertion(
   file: ExecutionRequest["generatedFiles"][number],
@@ -372,9 +443,10 @@ function validateGeneratedAssertion(
   const testStatement = executableStatements[0];
   if (testStatement === undefined || !ts.isExpressionStatement(testStatement))
     return { kind: "unsupported" };
-  const testCall = testStatement.expression;
+  const directTest = directGeneratedTest(testStatement.expression);
+  if (directTest === null) return { kind: "unsupported" };
+  const { testCall, wrapperCallback } = directTest;
   if (
-    !ts.isCallExpression(testCall) ||
     !ts.isIdentifier(testCall.expression) ||
     (testCall.expression.text !== "it" &&
       testCall.expression.text !== "test") ||
@@ -429,24 +501,84 @@ function validateGeneratedAssertion(
   }
   if (
     callbackArgument.parameters.length !== 0 ||
-    !hasDirectVitestImports(source, testCall.expression.text)
+    (wrapperCallback !== null && wrapperCallback.parameters.length !== 0) ||
+    !hasDirectVitestImports(
+      source,
+      testCall.expression.text,
+      wrapperCallback !== null,
+    )
   )
     return { kind: "invalid-provenance" };
-  const { line } = source.getLineAndCharacterOfPosition(
-    assertionStatement.getStart(source),
+  const { line, character } = source.getLineAndCharacterOfPosition(
+    assertionCall.expression.name.getStart(source),
   );
   return {
     kind: "valid",
-    assertion: { testName: nameArgument.text, line: line + 1 },
+    assertion: {
+      testName: nameArgument.text,
+      line: line + 1,
+      column: character + 1,
+    },
+  };
+}
+
+function directGeneratedTest(
+  expression: ts.Expression,
+): DirectGeneratedTest | null {
+  if (!ts.isCallExpression(expression)) return null;
+  if (
+    ts.isIdentifier(expression.expression) &&
+    (expression.expression.text === "it" ||
+      expression.expression.text === "test")
+  ) {
+    return { testCall: expression, wrapperCallback: null };
+  }
+  if (
+    !ts.isIdentifier(expression.expression) ||
+    expression.expression.text !== "describe" ||
+    expression.arguments.length !== 2
+  ) {
+    return null;
+  }
+  const [nameArgument, callbackArgument] = expression.arguments;
+  if (
+    nameArgument === undefined ||
+    !ts.isStringLiteral(nameArgument) ||
+    callbackArgument === undefined ||
+    (!ts.isArrowFunction(callbackArgument) &&
+      !ts.isFunctionExpression(callbackArgument)) ||
+    !ts.isBlock(callbackArgument.body) ||
+    callbackArgument.body.statements.length !== 1
+  ) {
+    return null;
+  }
+  const innerStatement = callbackArgument.body.statements[0];
+  if (
+    innerStatement === undefined ||
+    !ts.isExpressionStatement(innerStatement) ||
+    !ts.isCallExpression(innerStatement.expression) ||
+    !ts.isIdentifier(innerStatement.expression.expression) ||
+    (innerStatement.expression.expression.text !== "it" &&
+      innerStatement.expression.expression.text !== "test")
+  ) {
+    return null;
+  }
+  return {
+    testCall: innerStatement.expression,
+    wrapperCallback: callbackArgument,
   };
 }
 
 function hasDirectVitestImports(
   source: ts.SourceFile,
   testIdentifier: "it" | "test",
+  usesDescribe: boolean,
 ): boolean {
-  let expectImports = 0;
-  let testImports = 0;
+  const requiredImports = new Map<string, number>([
+    ["expect", 0],
+    [testIdentifier, 0],
+  ]);
+  if (usesDescribe) requiredImports.set("describe", 0);
   for (const statement of source.statements) {
     if (!ts.isImportDeclaration(statement)) continue;
     if (statement.importClause?.isTypeOnly === true) continue;
@@ -456,13 +588,13 @@ function hasDirectVitestImports(
     const bindings = statement.importClause?.namedBindings;
     if (bindings === undefined) continue;
     if (ts.isNamespaceImport(bindings)) {
-      if (["expect", "it", "test"].includes(bindings.name.text)) return false;
+      if (requiredImports.has(bindings.name.text)) return false;
       continue;
     }
     for (const specifier of bindings.elements) {
       if (specifier.isTypeOnly) continue;
       const localName = specifier.name.text;
-      if (localName !== "expect" && localName !== testIdentifier) continue;
+      if (!requiredImports.has(localName)) continue;
       const importedName = specifier.propertyName?.text ?? localName;
       if (
         moduleName !== "vitest" ||
@@ -471,11 +603,10 @@ function hasDirectVitestImports(
       ) {
         return false;
       }
-      if (localName === "expect") expectImports += 1;
-      else testImports += 1;
+      requiredImports.set(localName, (requiredImports.get(localName) ?? 0) + 1);
     }
   }
-  return expectImports === 1 && testImports === 1;
+  return [...requiredImports.values()].every((count) => count === 1);
 }
 
 function isResponseDeclaration(statement: ts.Statement): boolean {
@@ -503,9 +634,28 @@ function isObservedObject(value: ts.Expression | undefined): boolean {
     status !== undefined &&
     propertyPath(status).join(".") === "response.status" &&
     code !== undefined &&
-    propertyPath(code).at(0) === "response" &&
-    propertyPath(code).at(-1) === "code"
+    isObservedCodeExpression(code)
   );
+}
+
+function isObservedCodeExpression(value: ts.Expression): boolean {
+  const directPath = propertyPath(value);
+  if (directPath.at(0) === "response" && directPath.at(-1) === "code") {
+    return true;
+  }
+  if (
+    !ts.isConditionalExpression(value) ||
+    !ts.isBinaryExpression(value.condition) ||
+    value.condition.operatorToken.kind !== ts.SyntaxKind.InKeyword ||
+    !ts.isStringLiteral(value.condition.left) ||
+    value.condition.left.text !== "code" ||
+    propertyPath(value.condition.right).join(".") !== "response.body" ||
+    propertyPath(value.whenTrue).join(".") !== "response.body.code" ||
+    value.whenFalse.kind !== ts.SyntaxKind.NullKeyword
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function isExpectedObject(
@@ -554,10 +704,11 @@ function failureBindsToAssertion(
   message: string,
   path: string,
   line: number,
+  column: number,
 ): boolean {
   const pathPattern = path.split("/").map(escapeRegExp).join("[\\\\/]");
   return new RegExp(
-    `(?:^|\\n)[^\\r\\n]*${pathPattern}:${line}:\\d+(?:$|\\s)`,
+    `(?:^|\\n)[^\\r\\n]*${pathPattern}:${line}:${column}(?:$|\\s)`,
     "u",
   ).test(message);
 }
@@ -569,8 +720,24 @@ function escapeRegExp(value: string): string {
 function parseSerializedBehavior(
   value: string,
 ): { httpStatus: number; code: string } | null {
-  const status = /(?:httpStatus|status)\s*:\s*(-?\d+)/u.exec(value)?.[1];
-  const code = /code\s*:\s*(["'])(.*?)\1/u.exec(value)?.[2];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (
+      isRecord(parsed) &&
+      Object.keys(parsed).length === 2 &&
+      typeof parsed.httpStatus === "number" &&
+      Number.isInteger(parsed.httpStatus) &&
+      typeof parsed.code === "string"
+    ) {
+      return { httpStatus: parsed.httpStatus, code: parsed.code };
+    }
+  } catch {
+    // Vitest's legacy assertion text is JavaScript-like rather than JSON.
+  }
+  const status = /["']?(?:httpStatus|status)["']?\s*:\s*(-?\d+)/u.exec(
+    value,
+  )?.[1];
+  const code = /["']?code["']?\s*:\s*(["'])(.*?)\1/u.exec(value)?.[2];
   if (status === undefined || code === undefined) return null;
   const httpStatus = Number(status);
   return Number.isInteger(httpStatus) ? { httpStatus, code } : null;

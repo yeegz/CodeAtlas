@@ -41,8 +41,10 @@ import type {
 } from "./execution-provider.js";
 import {
   parseVitestResult,
+  requiresStructuredReporter,
   unexecutedGeneratedTests,
 } from "./vitest-result.js";
+import { trustedVitestReporterSource } from "./trusted-vitest-reporter.js";
 
 const RUNNER_VERSION = "0.1.0";
 const EXCLUDED_COPY_NAMES = new Set(["node_modules", "coverage", ".git"]);
@@ -185,6 +187,17 @@ export class LocalExecutionProvider implements ExecutionProvider {
         controlRoot,
         `vitest-result-${randomUUID()}.json`,
       );
+      const useTrustedReporter = requiresStructuredReporter(
+        request.generatedFiles,
+      );
+      const reporterPath = useTrustedReporter
+        ? join(controlRoot, `vitest-reporter-${randomUUID()}.mjs`)
+        : null;
+      if (reporterPath !== null) {
+        await writeFile(reporterPath, trustedVitestReporterSource(resultPath), {
+          mode: 0o600,
+        });
+      }
       const coverageDirectory = join(controlRoot, `coverage-${randomUUID()}`);
       await mkdir(coverageDirectory, { mode: 0o700 });
       const coveragePath = join(coverageDirectory, "coverage-final.json");
@@ -230,7 +243,7 @@ export class LocalExecutionProvider implements ExecutionProvider {
           vitestCliPath,
           "run",
           `--root=${snapshotCopy}`,
-          "--reporter=json",
+          `--reporter=${reporterPath ?? "json"}`,
           `--outputFile=${resultPath}`,
           "--coverage.enabled",
           "--coverage.provider=v8",
