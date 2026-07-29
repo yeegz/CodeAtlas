@@ -14,6 +14,7 @@ export type {
   SignedEvidenceManifest,
 } from "./analyze-comparison.js";
 export type {
+  ArtifactStoreFileSystem,
   ArtifactStore,
   LocalArtifactStoreOptions,
 } from "./local-artifact-store.js";

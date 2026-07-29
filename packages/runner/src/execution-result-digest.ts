@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalize } from "json-canonicalize";
+import { z } from "zod";
 
 import type { ExecutionResult } from "./execution-provider.js";
 
@@ -8,6 +9,80 @@ export type BoundExecutionResult = Omit<ExecutionResult, "resultDigest">;
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const SHA256 = /^sha256:[0-9a-f]{64}$/u;
+const SNAPSHOT_SHA = /^[0-9a-f]{40}$/u;
+
+const SafeRelativePathSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) =>
+      !value.startsWith("/") &&
+      !value.includes("\\") &&
+      !/^[A-Za-z]:/u.test(value) &&
+      value.split("/").every((segment) => segment !== "." && segment !== ".."),
+    "path must be a safe repository-relative POSIX path",
+  );
+
+const ExecutionBehaviorSchema = z.strictObject({
+  httpStatus: z.number().int().min(100).max(599),
+  code: z.string().min(1),
+});
+
+const ExecutionTestCaseSchema = z.strictObject({
+  name: z.string().min(1),
+  path: SafeRelativePathSchema,
+  status: z.enum(["PASSED", "FAILED", "SKIPPED"]),
+  failureMessage: z.string().nullable(),
+  generatedObjectiveId: z.string().min(1).nullable(),
+});
+
+const ExecutionCoverageSchema = z.strictObject({
+  path: SafeRelativePathSchema,
+  coveredLines: z.array(z.number().int().positive()),
+});
+
+const ExecutionObservationSchema = z.strictObject({
+  testName: z.string().min(1),
+  path: SafeRelativePathSchema,
+  generatedObjectiveId: z.string().min(1).nullable(),
+  source: z.literal("TEST_ASSERTION"),
+  expected: ExecutionBehaviorSchema,
+  actual: ExecutionBehaviorSchema,
+});
+
+const BoundExecutionResultSchema = z.strictObject({
+  executionId: z.string().regex(UUID),
+  revision: z.enum(["base", "head"]),
+  snapshotSha: z.string().regex(SNAPSHOT_SHA),
+  terminalState: z.enum(["COMPLETED", "TIMED_OUT", "OUTPUT_LIMIT", "FAILED"]),
+  exitCode: z.number().int().nullable(),
+  durationMs: z.number().finite().nonnegative(),
+  testCases: z.array(ExecutionTestCaseSchema),
+  coverage: z.array(ExecutionCoverageSchema),
+  observations: z.array(ExecutionObservationSchema),
+  stdout: z.string(),
+  stderr: z.string(),
+  environmentDigest: z.string().min(1),
+});
+
+export const ExecutionResultSchema = BoundExecutionResultSchema.extend({
+  resultDigest: z.string().regex(SHA256),
+}).superRefine((result, context) => {
+  const { resultDigest, ...bound } = result;
+  let expectedDigest: string | null = null;
+  try {
+    expectedDigest = computeExecutionResultDigest(bound);
+  } catch {
+    // Primitive/schema issues are reported at their exact paths by Zod.
+  }
+  if (expectedDigest === null || resultDigest !== expectedDigest) {
+    context.addIssue({
+      code: "custom",
+      path: ["resultDigest"],
+      message: "resultDigest does not bind the canonical execution result",
+    });
+  }
+});
 
 export function computeExecutionResultDigest(
   result: BoundExecutionResult,
@@ -24,23 +99,7 @@ export function computeExecutionResultDigest(
 export function hasValidExecutionResultBinding(
   value: unknown,
 ): value is ExecutionResult {
-  if (!isRecord(value)) return false;
-  if (
-    typeof value.executionId !== "string" ||
-    !UUID.test(value.executionId) ||
-    typeof value.resultDigest !== "string" ||
-    !SHA256.test(value.resultDigest)
-  ) {
-    return false;
-  }
-  try {
-    return (
-      value.resultDigest ===
-      computeExecutionResultDigest(value as unknown as BoundExecutionResult)
-    );
-  } catch {
-    return false;
-  }
+  return ExecutionResultSchema.safeParse(value).success;
 }
 
 function projectBoundExecutionResult(
@@ -65,7 +124,7 @@ function projectBoundExecutionResult(
     !UUID.test(executionId) ||
     !isRevision(revision) ||
     snapshotSha === null ||
-    !/^[0-9a-f]{40}$/u.test(snapshotSha) ||
+    !SNAPSHOT_SHA.test(snapshotSha) ||
     !isTerminalState(terminalState) ||
     (exitCode !== null && !Number.isInteger(exitCode)) ||
     typeof durationMs !== "number" ||

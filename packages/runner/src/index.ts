@@ -5,6 +5,7 @@ export type {
 } from "./execution-provider.js";
 export {
   computeExecutionResultDigest,
+  ExecutionResultSchema,
   hasValidExecutionResultBinding,
 } from "./execution-result-digest.js";
 export type { BoundExecutionResult } from "./execution-result-digest.js";

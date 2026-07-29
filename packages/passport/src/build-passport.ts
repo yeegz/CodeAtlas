@@ -9,10 +9,7 @@ import {
   type SourceLocation,
   type TestExecution,
 } from "@codeatlas/evidence";
-import {
-  hasValidExecutionResultBinding,
-  type ExecutionResult,
-} from "@codeatlas/runner";
+import { ExecutionResultSchema, type ExecutionResult } from "@codeatlas/runner";
 import { canonicalize } from "json-canonicalize";
 import { z } from "zod";
 
@@ -129,11 +126,6 @@ const PassportSummarySchema = z.strictObject({
     total: z.number().int().nonnegative(),
   }),
 });
-
-const ExecutionResultSchema = z.custom<ExecutionResult>(
-  hasValidExecutionResultBinding,
-  "Execution result does not have a valid digest binding",
-);
 
 export const BuiltChangePassportSchema = z
   .strictObject({
@@ -368,18 +360,15 @@ function validateRun(
   run: ExecutionResult,
   input: Pick<BuildPassportInput, "baseSha" | "headSha">,
 ): ExecutionResult {
-  if (!hasValidExecutionResultBinding(run)) {
-    throw new TypeError(
-      "Execution result does not have a valid digest binding",
-    );
-  }
-  const expectedSha = run.revision === "base" ? input.baseSha : input.headSha;
-  if (run.snapshotSha !== expectedSha) {
+  const parsed = ExecutionResultSchema.parse(run);
+  const expectedSha =
+    parsed.revision === "base" ? input.baseSha : input.headSha;
+  if (parsed.snapshotSha !== expectedSha) {
     throw new TypeError(
       "Execution result revision does not match the Passport",
     );
   }
-  return structuredClone(run);
+  return structuredClone(parsed);
 }
 
 function deriveExecutionState(

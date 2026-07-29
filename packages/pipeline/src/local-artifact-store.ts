@@ -23,6 +23,16 @@ export interface LocalArtifactStoreOptions {
   repositoryRoot: string;
   analysisId: string;
   maxReadBytes?: number;
+  fileSystem?: ArtifactStoreFileSystem;
+}
+
+export interface ArtifactStoreFileSystem {
+  open: typeof open;
+  lstat: typeof lstat;
+  mkdir: typeof mkdir;
+  realpath: typeof realpath;
+  link: typeof link;
+  unlink: typeof unlink;
 }
 
 interface DirectoryIdentity {
@@ -32,11 +42,26 @@ interface DirectoryIdentity {
   inode: number;
 }
 
+interface FileIdentity {
+  device: number;
+  inode: number;
+}
+
+const DEFAULT_FILE_SYSTEM: ArtifactStoreFileSystem = Object.freeze({
+  open,
+  lstat,
+  mkdir,
+  realpath,
+  link,
+  unlink,
+});
+
 export class LocalArtifactStore implements ArtifactStore {
   readonly #repositoryRoot: string;
   readonly #analysisId: string;
   readonly #relativeDirectory: string;
   readonly #maxReadBytes: number;
+  readonly #fileSystem: ArtifactStoreFileSystem;
 
   constructor(options: LocalArtifactStoreOptions) {
     if (!ANALYSIS_ID.test(options.analysisId)) {
@@ -54,6 +79,7 @@ export class LocalArtifactStore implements ArtifactStore {
       this.#analysisId,
     );
     this.#maxReadBytes = maxReadBytes;
+    this.#fileSystem = options.fileSystem ?? DEFAULT_FILE_SYSTEM;
   }
 
   async putJson(
@@ -90,8 +116,11 @@ export class LocalArtifactStore implements ArtifactStore {
       `.temporary-${kind}-${randomUUID()}`,
     );
     let handle: Awaited<ReturnType<typeof open>> | undefined;
+    let ownsTemp = false;
+    let temporaryIdentity: FileIdentity | undefined;
+    let primaryError: unknown;
     try {
-      handle = await open(
+      handle = await this.#fileSystem.open(
         temporaryPath,
         fsConstants.O_CREAT |
           fsConstants.O_EXCL |
@@ -99,6 +128,12 @@ export class LocalArtifactStore implements ArtifactStore {
           (fsConstants.O_NOFOLLOW ?? 0),
         0o600,
       );
+      ownsTemp = true;
+      const createdInfo = await handle.stat();
+      temporaryIdentity = {
+        device: createdInfo.dev,
+        inode: createdInfo.ino,
+      };
       await handle.writeFile(canonical, "utf8");
       await handle.sync();
       await handle.chmod(0o600);
@@ -109,7 +144,7 @@ export class LocalArtifactStore implements ArtifactStore {
 
       await this.#revalidateDirectory(directory);
       try {
-        await link(temporaryPath, destination);
+        await this.#fileSystem.link(temporaryPath, destination);
       } catch (error) {
         if (!isAlreadyExists(error)) throw error;
         await this.#readAndVerify(path, canonical);
@@ -118,16 +153,32 @@ export class LocalArtifactStore implements ArtifactStore {
       }
       await this.#revalidateDirectory(directory);
       await this.#readAndVerify(path, canonical);
-      await syncDirectory(directory);
+      await syncDirectory(directory, this.#fileSystem);
       return { digest, path };
+    } catch (error) {
+      primaryError = error;
+      throw error;
     } finally {
-      await handle?.close();
-      await this.#revalidateDirectory(directory);
+      let cleanupError: unknown;
       try {
-        await unlink(temporaryPath);
-        await syncDirectory(directory);
+        await handle?.close();
       } catch (error) {
-        if (!isNotFound(error)) throw error;
+        cleanupError = error;
+      }
+      if (ownsTemp && temporaryIdentity !== undefined) {
+        try {
+          const removed = await removeOwnedTemporaryFile(
+            temporaryPath,
+            temporaryIdentity,
+            this.#fileSystem,
+          );
+          if (removed) await syncDirectory(directory, this.#fileSystem);
+        } catch (error) {
+          cleanupError ??= error;
+        }
+      }
+      if (primaryError === undefined && cleanupError !== undefined) {
+        throw cleanupError;
       }
     }
   }
@@ -156,7 +207,7 @@ export class LocalArtifactStore implements ArtifactStore {
     const directory = await this.#secureDirectory();
     const absolutePath = resolve(directory.path, name);
     assertContained(directory.path, absolutePath);
-    const info = await lstat(absolutePath);
+    const info = await this.#fileSystem.lstat(absolutePath);
     if (info.isSymbolicLink() || !info.isFile()) {
       throw new Error("artifact is a symlink or is not a regular file");
     }
@@ -166,7 +217,7 @@ export class LocalArtifactStore implements ArtifactStore {
     }
 
     await this.#revalidateDirectory(directory);
-    const handle = await open(
+    const handle = await this.#fileSystem.open(
       absolutePath,
       fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
     );
@@ -212,13 +263,15 @@ export class LocalArtifactStore implements ArtifactStore {
   }
 
   async #secureDirectory(): Promise<DirectoryIdentity> {
-    const repositoryRoot = await realpath(this.#repositoryRoot);
+    const repositoryRoot = await this.#fileSystem.realpath(
+      this.#repositoryRoot,
+    );
     let current = repositoryRoot;
     for (const segment of [".codeatlas", "runs", this.#analysisId]) {
       current = resolve(current, segment);
       assertContained(repositoryRoot, current);
       try {
-        const info = await lstat(current);
+        const info = await this.#fileSystem.lstat(current);
         if (info.isSymbolicLink() || !info.isDirectory()) {
           throw new Error(
             "artifact directory contains a symlink or non-directory",
@@ -227,12 +280,12 @@ export class LocalArtifactStore implements ArtifactStore {
       } catch (error) {
         if (!isNotFound(error)) throw error;
         try {
-          await mkdir(current, { mode: 0o700 });
+          await this.#fileSystem.mkdir(current, { mode: 0o700 });
         } catch (mkdirError) {
           if (!isAlreadyExists(mkdirError)) throw mkdirError;
         }
       }
-      const info = await lstat(current);
+      const info = await this.#fileSystem.lstat(current);
       if (
         info.isSymbolicLink() ||
         !info.isDirectory() ||
@@ -240,28 +293,28 @@ export class LocalArtifactStore implements ArtifactStore {
       ) {
         throw new Error("artifact directory is not a private directory");
       }
-      if ((await realpath(current)) !== current) {
+      if ((await this.#fileSystem.realpath(current)) !== current) {
         throw new Error("artifact directory real path changed");
       }
     }
-    const info = await lstat(current);
+    const info = await this.#fileSystem.lstat(current);
     return {
       path: current,
-      realPath: await realpath(current),
+      realPath: await this.#fileSystem.realpath(current),
       device: info.dev,
       inode: info.ino,
     };
   }
 
   async #revalidateDirectory(identity: DirectoryIdentity): Promise<void> {
-    const info = await lstat(identity.path);
+    const info = await this.#fileSystem.lstat(identity.path);
     if (
       info.isSymbolicLink() ||
       !info.isDirectory() ||
       info.dev !== identity.device ||
       info.ino !== identity.inode ||
       (info.mode & 0o077) !== 0 ||
-      (await realpath(identity.path)) !== identity.realPath
+      (await this.#fileSystem.realpath(identity.path)) !== identity.realPath
     ) {
       throw new Error("artifact directory identity changed during publication");
     }
@@ -317,8 +370,40 @@ function assertPrivateRegularFile(
   }
 }
 
-async function syncDirectory(directory: DirectoryIdentity): Promise<void> {
-  const handle = await open(
+async function removeOwnedTemporaryFile(
+  path: string,
+  identity: FileIdentity,
+  fileSystem: ArtifactStoreFileSystem,
+): Promise<boolean> {
+  let info: Awaited<ReturnType<typeof lstat>>;
+  try {
+    info = await fileSystem.lstat(path);
+  } catch (error) {
+    if (isNotFound(error)) return false;
+    throw error;
+  }
+  if (
+    info.isSymbolicLink() ||
+    !info.isFile() ||
+    info.dev !== identity.device ||
+    info.ino !== identity.inode
+  ) {
+    return false;
+  }
+  try {
+    await fileSystem.unlink(path);
+    return true;
+  } catch (error) {
+    if (isNotFound(error)) return false;
+    throw error;
+  }
+}
+
+async function syncDirectory(
+  directory: DirectoryIdentity,
+  fileSystem: ArtifactStoreFileSystem,
+): Promise<void> {
+  const handle = await fileSystem.open(
     directory.path,
     fsConstants.O_RDONLY |
       (fsConstants.O_DIRECTORY ?? 0) |
