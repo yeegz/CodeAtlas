@@ -93,6 +93,20 @@ function declarationName(node: ts.NamedDeclaration): string | null {
   return node.name.getText();
 }
 
+function unwrapTransparentExpression(expression: ts.Expression): ts.Expression {
+  let current = expression;
+  while (
+    ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isTypeAssertionExpression(current) ||
+    ts.isNonNullExpression(current) ||
+    ts.isSatisfiesExpression(current)
+  ) {
+    current = current.expression;
+  }
+  return current;
+}
+
 function declarationSignature(checker: ts.TypeChecker, node: ts.Node): string {
   if (
     ts.isFunctionDeclaration(node) ||
@@ -138,28 +152,45 @@ function evidenceFor(
   };
 }
 
+function modifierChainRoot(
+  expression: ts.Expression,
+): ts.Identifier | undefined {
+  if (ts.isIdentifier(expression)) return expression;
+  if (
+    ts.isPropertyAccessExpression(expression) &&
+    TEST_MODIFIERS.has(expression.name.text)
+  ) {
+    return modifierChainRoot(expression.expression);
+  }
+  return undefined;
+}
+
+function eachInvocationRoot(
+  expression: ts.Expression,
+): ts.Identifier | undefined {
+  if (
+    ts.isCallExpression(expression) &&
+    ts.isPropertyAccessExpression(expression.expression) &&
+    expression.expression.name.text === "each"
+  ) {
+    return modifierChainRoot(expression.expression.expression);
+  }
+  if (
+    ts.isPropertyAccessExpression(expression) &&
+    TEST_MODIFIERS.has(expression.name.text)
+  ) {
+    return eachInvocationRoot(expression.expression);
+  }
+  return undefined;
+}
+
 function testName(
   node: ts.CallExpression,
   checker: ts.TypeChecker,
   frameworkBindings: Set<ts.Symbol>,
 ): string | null {
-  let root: ts.Identifier | undefined;
-  if (ts.isIdentifier(node.expression)) {
-    root = node.expression;
-  } else if (
-    ts.isPropertyAccessExpression(node.expression) &&
-    TEST_MODIFIERS.has(node.expression.name.text) &&
-    ts.isIdentifier(node.expression.expression)
-  ) {
-    root = node.expression.expression;
-  } else if (
-    ts.isCallExpression(node.expression) &&
-    ts.isPropertyAccessExpression(node.expression.expression) &&
-    node.expression.expression.name.text === "each" &&
-    ts.isIdentifier(node.expression.expression.expression)
-  ) {
-    root = node.expression.expression.expression;
-  }
+  const root =
+    eachInvocationRoot(node.expression) ?? modifierChainRoot(node.expression);
   if (!root) return null;
 
   const symbol = checker.getSymbolAtLocation(root);
@@ -363,12 +394,13 @@ export async function analyzeSnapshot(input: {
         ts.isExportAssignment(statement) &&
         !statement.isExportEquals
       ) {
-        const targetDeclaration = ts.isIdentifier(statement.expression)
-          ? resolvedDeclaration(statement.expression)
-          : ts.isFunctionExpression(statement.expression) ||
-              ts.isArrowFunction(statement.expression) ||
-              ts.isClassExpression(statement.expression)
-            ? statement.expression
+        const expression = unwrapTransparentExpression(statement.expression);
+        const targetDeclaration = ts.isIdentifier(expression)
+          ? resolvedDeclaration(expression)
+          : ts.isFunctionExpression(expression) ||
+              ts.isArrowFunction(expression) ||
+              ts.isClassExpression(expression)
+            ? expression
             : undefined;
         if (targetDeclaration) exportListedDeclarations.add(targetDeclaration);
         pendingExports.push({
@@ -462,31 +494,31 @@ export async function analyzeSnapshot(input: {
         }
       } else if (
         ts.isExportAssignment(statement) &&
-        !statement.isExportEquals &&
-        (ts.isFunctionExpression(statement.expression) ||
-          ts.isArrowFunction(statement.expression))
+        !statement.isExportEquals
       ) {
-        addSymbol(
-          sourceFile,
-          path,
-          statement.expression as ts.Node & ts.NamedDeclaration,
-          "function",
-          "default",
-          "default",
-        );
-      } else if (
-        ts.isExportAssignment(statement) &&
-        !statement.isExportEquals &&
-        ts.isClassExpression(statement.expression)
-      ) {
-        addSymbol(
-          sourceFile,
-          path,
-          statement.expression,
-          "class",
-          "default",
-          "default",
-        );
+        const expression = unwrapTransparentExpression(statement.expression);
+        if (
+          ts.isFunctionExpression(expression) ||
+          ts.isArrowFunction(expression)
+        ) {
+          addSymbol(
+            sourceFile,
+            path,
+            expression as ts.Node & ts.NamedDeclaration,
+            "function",
+            "default",
+            "default",
+          );
+        } else if (ts.isClassExpression(expression)) {
+          addSymbol(
+            sourceFile,
+            path,
+            expression,
+            "class",
+            "default",
+            "default",
+          );
+        }
       }
 
       if (

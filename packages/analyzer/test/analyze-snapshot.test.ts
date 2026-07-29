@@ -232,6 +232,57 @@ it("represents an anonymous default arrow export as a function contract", async 
   );
 });
 
+it("normalizes transparent wrappers around anonymous default functions", async () => {
+  const wrappedExpressions = {
+    "as.ts": "(() => target()) as () => string",
+    "assertion.ts": "<() => string>(() => target())",
+    "non-null.ts": "(() => target())!",
+    "parenthesized.ts": "(() => target())",
+    "satisfies.ts": "(() => target()) satisfies () => string",
+  };
+  const analysis = await analyzeFiles(
+    Object.fromEntries(
+      Object.entries(wrappedExpressions).map(([path, expression]) => [
+        path,
+        [
+          "export function target(): string { return 'safe'; }",
+          `export default ${expression};`,
+        ].join("\n"),
+      ]),
+    ),
+    "5",
+  );
+
+  const defaults = analysis.symbols.filter(
+    (symbol) => symbol.name === "default",
+  );
+  const defaultContracts = analysis.contracts.filter(
+    (contract) => contract.name === "default",
+  );
+  const defaultCalls = analysis.edges.filter(
+    (edge) =>
+      edge.relation === "CALLS" &&
+      edge.fromName === "default" &&
+      edge.toName === "target",
+  );
+
+  expect(defaults).toHaveLength(5);
+  expect(defaultContracts).toHaveLength(5);
+  expect(defaultCalls).toHaveLength(5);
+  expect(defaults.map((symbol) => symbol.source.path)).toEqual([
+    "as.ts",
+    "assertion.ts",
+    "non-null.ts",
+    "parenthesized.ts",
+    "satisfies.ts",
+  ]);
+  expect(
+    analysis.edges.filter(
+      (edge) => edge.relation === "EXPORTS" && edge.toName === "default",
+    ),
+  ).toHaveLength(5);
+});
+
 it("discovers chained Vitest definitions through imported bindings", async () => {
   const analysis = await analyzeFiles(
     {
@@ -255,6 +306,33 @@ it("discovers chained Vitest definitions through imported bindings", async () =>
     "parameterized case",
   ]);
   expect(analysis.tests).toHaveLength(5);
+});
+
+it("discovers composed each chains only for supported framework modifiers", async () => {
+  const analysis = await analyzeFiles(
+    {
+      "composed.test.ts": [
+        "import { it, test } from 'vitest';",
+        "const rows = [[1]];",
+        "test.concurrent.each(rows)('concurrent each', () => {});",
+        "it.only.each(rows)('only each', () => {});",
+        "test.each(rows).skip('skipped each', () => {});",
+        "it.unknown.each(rows)('unknown modifier', () => {});",
+      ].join("\n"),
+      "local-composed.test.ts": [
+        "const test = { concurrent: { each: (_rows: number[][]) => (_name: string, callback: () => void) => callback() } };",
+        "test.concurrent.each([])('local composed', () => {});",
+      ].join("\n"),
+    },
+    "6",
+  );
+
+  expect(analysis.tests.map((test) => test.name)).toEqual([
+    "concurrent each",
+    "only each",
+    "skipped each",
+  ]);
+  expect(analysis.tests).toHaveLength(3);
 });
 
 it("does not classify a locally bound function named test", async () => {
