@@ -66,27 +66,37 @@ interface RuntimeIdentity {
   environmentDigest: string;
 }
 
+interface LocalExecutionProviderInternals {
+  platform?: NodeJS.Platform;
+}
+
 export class LocalExecutionProvider implements ExecutionProvider {
   readonly #workspaceRoot: string;
   readonly #nodePath: string;
   readonly #pnpmCliPath: string;
   readonly #temporaryParent: string;
-  readonly #platform: NodeJS.Platform;
+  readonly #unsupportedPlatform: boolean;
 
-  constructor(options: LocalExecutionProviderOptions = {}) {
+  constructor(
+    options: LocalExecutionProviderOptions = {},
+    internals: LocalExecutionProviderInternals = {},
+  ) {
     this.#workspaceRoot = resolve(options.workspaceRoot ?? process.cwd());
     this.#nodePath = resolveNodePath(options.nodePath);
     this.#pnpmCliPath = resolvePnpmCliPath(
       options.pnpmCliPath ?? options.pnpmPath,
     );
     this.#temporaryParent = resolve(options.temporaryParent ?? tmpdir());
-    this.#platform = options.platform ?? process.platform;
+    this.#unsupportedPlatform =
+      process.platform === "win32" ||
+      options.platform === "win32" ||
+      internals.platform === "win32";
   }
 
   async run(request: ExecutionRequest): Promise<ExecutionResult> {
     validatePolicy(request.policy);
     const startedAt = performance.now();
-    if (this.#platform === "win32") {
+    if (this.#unsupportedPlatform) {
       return buildResult(request, unsupportedRuntimeIdentity(), startedAt, {
         terminalState: "FAILED",
         exitCode: null,
@@ -881,7 +891,7 @@ function sanitizeOutput(
     (_whole, prefix: string, label: string) => `${prefix}${label}[REDACTED]`,
   );
   sanitized = sanitized.replace(
-    /(^|[\t ("'=])(?:[A-Za-z]:[\\/]|\/)[^\r\n]*/gmu,
+    /(^|[\t ({["'=,:;])(?:[A-Za-z]:[\\/]|\/)[^\r\n]*/gmu,
     (_whole, prefix: string) => `${prefix}<absolute-path>`,
   );
   return sanitized;

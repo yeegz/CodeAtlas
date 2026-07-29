@@ -90,7 +90,13 @@ export function parseVitestResult(
 
       const failureMessages = assertion.failureMessages as string[];
       const generatedFile = generated.get(path);
-      const generatedAssertion = generatedAssertions.get(path) ?? null;
+      const generatedValidation = generatedAssertions.get(path);
+      if (generatedValidation?.kind === "invalid-provenance")
+        structurallyValid = false;
+      const generatedAssertion =
+        generatedValidation?.kind === "valid"
+          ? generatedValidation.assertion
+          : null;
       testCases.push({
         name,
         path,
@@ -344,9 +350,14 @@ interface GeneratedAssertion {
   line: number;
 }
 
+type GeneratedAssertionValidation =
+  | { kind: "valid"; assertion: GeneratedAssertion }
+  | { kind: "invalid-provenance" }
+  | { kind: "unsupported" };
+
 function validateGeneratedAssertion(
   file: ExecutionRequest["generatedFiles"][number],
-): GeneratedAssertion | null {
+): GeneratedAssertionValidation {
   const source = ts.createSourceFile(
     file.path,
     file.content,
@@ -357,10 +368,10 @@ function validateGeneratedAssertion(
   const executableStatements = source.statements.filter(
     (statement) => !ts.isImportDeclaration(statement),
   );
-  if (executableStatements.length !== 1) return null;
+  if (executableStatements.length !== 1) return { kind: "unsupported" };
   const testStatement = executableStatements[0];
   if (testStatement === undefined || !ts.isExpressionStatement(testStatement))
-    return null;
+    return { kind: "unsupported" };
   const testCall = testStatement.expression;
   if (
     !ts.isCallExpression(testCall) ||
@@ -369,7 +380,7 @@ function validateGeneratedAssertion(
       testCall.expression.text !== "test") ||
     testCall.arguments.length !== 2
   ) {
-    return null;
+    return { kind: "unsupported" };
   }
   const [nameArgument, callbackArgument] = testCall.arguments;
   if (
@@ -381,7 +392,7 @@ function validateGeneratedAssertion(
     !ts.isBlock(callbackArgument.body) ||
     callbackArgument.body.statements.length !== 2
   ) {
-    return null;
+    return { kind: "unsupported" };
   }
   const [responseStatement, assertionStatement] =
     callbackArgument.body.statements;
@@ -391,7 +402,7 @@ function validateGeneratedAssertion(
     assertionStatement === undefined ||
     !ts.isExpressionStatement(assertionStatement)
   ) {
-    return null;
+    return { kind: "unsupported" };
   }
   const assertionCall = assertionStatement.expression;
   if (
@@ -400,7 +411,7 @@ function validateGeneratedAssertion(
     !ts.isPropertyAccessExpression(assertionCall.expression) ||
     assertionCall.expression.name.text !== "toEqual"
   ) {
-    return null;
+    return { kind: "unsupported" };
   }
   const expectCall = assertionCall.expression.expression;
   const expectedObject = assertionCall.arguments[0];
@@ -414,12 +425,55 @@ function validateGeneratedAssertion(
     !isObservedObject(expectCall.arguments[0]) ||
     !isExpectedObject(expectedObject, file.expectedBehavior)
   ) {
-    return null;
+    return { kind: "unsupported" };
   }
+  if (
+    callbackArgument.parameters.length !== 0 ||
+    !hasDirectVitestImports(source, testCall.expression.text)
+  )
+    return { kind: "invalid-provenance" };
   const { line } = source.getLineAndCharacterOfPosition(
     assertionStatement.getStart(source),
   );
-  return { testName: nameArgument.text, line: line + 1 };
+  return {
+    kind: "valid",
+    assertion: { testName: nameArgument.text, line: line + 1 },
+  };
+}
+
+function hasDirectVitestImports(
+  source: ts.SourceFile,
+  testIdentifier: "it" | "test",
+): boolean {
+  let expectImports = 0;
+  let testImports = 0;
+  for (const statement of source.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    const moduleName = ts.isStringLiteral(statement.moduleSpecifier)
+      ? statement.moduleSpecifier.text
+      : null;
+    const bindings = statement.importClause?.namedBindings;
+    if (bindings === undefined) continue;
+    if (ts.isNamespaceImport(bindings)) {
+      if (["expect", "it", "test"].includes(bindings.name.text)) return false;
+      continue;
+    }
+    for (const specifier of bindings.elements) {
+      const localName = specifier.name.text;
+      if (localName !== "expect" && localName !== testIdentifier) continue;
+      const importedName = specifier.propertyName?.text ?? localName;
+      if (
+        moduleName !== "vitest" ||
+        specifier.propertyName !== undefined ||
+        importedName !== localName
+      ) {
+        return false;
+      }
+      if (localName === "expect") expectImports += 1;
+      else testImports += 1;
+    }
+  }
+  return expectImports === 1 && testImports === 1;
 }
 
 function isResponseDeclaration(statement: ts.Statement): boolean {
