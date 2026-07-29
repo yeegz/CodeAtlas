@@ -68,10 +68,6 @@ it("merges tied evidence independently of input order and keeps distinct same-li
       id: "objective:regression-test:symbol%3AvalidateToken:branch%3Aconditional:conditional:17:restoreSession",
       evidenceIds: [
         "ev:branch",
-        "ev:contract",
-        "ev:selected",
-        "ev:branch-a",
-        "ev:branch-z",
         "ev:contract-a",
         "ev:contract-z",
         "ev:selected-a",
@@ -81,9 +77,6 @@ it("merges tied evidence independently of input order and keeps distinct same-li
     {
       id: "objective:regression-test:symbol%3AvalidateToken:branch%3Aexpiration:if:17:restoreSession",
       evidenceIds: [
-        "ev:branch",
-        "ev:contract",
-        "ev:selected",
         "ev:branch-a",
         "ev:branch-z",
         "ev:contract-a",
@@ -169,23 +162,17 @@ function changedSymbol(overrides: Partial<ChangedSymbol> = {}): ChangedSymbol {
   };
 }
 
-function branch(
-  overrides: Partial<AnalyzedBranch> = {},
-): AnalyzedBranch & { symbolId: string; line: number } {
+function branch(overrides: Partial<AnalyzedBranch> = {}): AnalyzedBranch {
   return {
     id: "branch:expiration",
     kind: "if",
     source: location("src/auth.ts", 17),
     evidenceIds: ["ev:branch"],
-    symbolId: "symbol:validateToken",
-    line: 17,
     ...overrides,
   };
 }
 
-function contract(
-  overrides: Partial<AnalyzedContract> = {},
-): AnalyzedContract & { path: string } {
+function contract(overrides: Partial<AnalyzedContract> = {}): AnalyzedContract {
   return {
     id: "contract:restoreSession",
     symbolId: "symbol:restoreSession",
@@ -194,7 +181,6 @@ function contract(
     signatureDigest: "digest:restoreSession",
     source: location("src/auth.ts", 21, 29),
     evidenceIds: ["ev:contract"],
-    path: overrides.source?.path ?? "src/auth.ts",
     ...overrides,
   };
 }

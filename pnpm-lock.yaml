@@ -69,7 +69,20 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
 
-  packages/generator: {}
+  packages/generator:
+    dependencies:
+      '@codeatlas/analyzer':
+        specifier: workspace:*
+        version: link:../analyzer
+      '@codeatlas/evidence':
+        specifier: workspace:*
+        version: link:../evidence
+      '@codeatlas/runner':
+        specifier: workspace:*
+        version: link:../runner
+      '@codeatlas/selector':
+        specifier: workspace:*
+        version: link:../selector
 
   packages/runner:
     dependencies:

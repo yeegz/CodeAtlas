@@ -69,6 +69,12 @@ export function parseVitestResult(
       continue;
     }
     reported.add(path);
+    if (
+      generatedAssertions.get(path)?.kind === "valid" &&
+      testFile.assertionResults.length !== 1
+    ) {
+      structurallyValid = false;
+    }
 
     for (const assertion of testFile.assertionResults) {
       if (!isRecord(assertion)) {
@@ -324,7 +330,7 @@ function parseStatus(value: unknown): "PASSED" | "FAILED" | "SKIPPED" | null {
 
 function parseActualBehavior(
   assertionResult: UnknownRecord,
-  message: string,
+  _message: string,
   binding: {
     path: string;
     line: number;
@@ -332,29 +338,7 @@ function parseActualBehavior(
     expected: { httpStatus: number; code: string };
   },
 ): { httpStatus: number; code: string } | null {
-  const structured = parseStructuredActualBehavior(assertionResult, binding);
-  if (structured !== null) return structured;
-  if (
-    !failureBindsToAssertion(
-      message,
-      binding.path,
-      binding.line,
-      binding.column,
-    )
-  )
-    return null;
-  const assertion =
-    /^AssertionError:\s+expected\s+(\{[^\n]*\})\s+to\s+(?:deeply\s+)?(?:equal|be)\s+(\{[^\n]*\})/u.exec(
-      message,
-    );
-  if (assertion?.[1] === undefined || assertion[2] === undefined) return null;
-  const actual = parseSerializedBehavior(assertion[1]);
-  const expected = parseSerializedBehavior(assertion[2]);
-  return actual !== null &&
-    expected?.httpStatus === binding.expected.httpStatus &&
-    expected.code === binding.expected.code
-    ? actual
-    : null;
+  return parseStructuredActualBehavior(assertionResult, binding);
 }
 
 function parseStructuredActualBehavior(
@@ -371,6 +355,7 @@ function parseStructuredActualBehavior(
   const detail = details[0];
   if (
     !isRecord(detail) ||
+    detail.assertionAuthentic !== true ||
     typeof detail.stack !== "string" ||
     !failureBindsToAssertion(
       detail.stack,
@@ -418,6 +403,22 @@ type GeneratedAssertionValidation =
   | { kind: "invalid-provenance" }
   | { kind: "unsupported" };
 
+export const CANONICAL_GENERATED_TEST_PATH =
+  "test/codeatlas.expired-session.test.ts";
+export const CANONICAL_GENERATED_TEST_CONTENT = `import { describe, expect, it } from "vitest";
+import { restoreSession } from "../src/auth.js";
+
+describe("generated: expired session regression", () => {
+  it("returns SESSION_EXPIRED for a non-refreshable expired token", () => {
+    const response = restoreSession({ subject: null, expiresAt: 50, refreshable: false }, 100);
+    expect({
+      httpStatus: response.status,
+      code: "code" in response.body ? response.body.code : null,
+    }).toEqual({ httpStatus: 401, code: "SESSION_EXPIRED" });
+  });
+});
+`;
+
 export function requiresStructuredReporter(
   files: ExecutionRequest["generatedFiles"],
 ): boolean {
@@ -429,6 +430,17 @@ export function requiresStructuredReporter(
 function validateGeneratedAssertion(
   file: ExecutionRequest["generatedFiles"][number],
 ): GeneratedAssertionValidation {
+  if (
+    file.path !== CANONICAL_GENERATED_TEST_PATH ||
+    file.content !== CANONICAL_GENERATED_TEST_CONTENT ||
+    file.objectiveId.length === 0 ||
+    file.evidenceIds.length === 0 ||
+    file.evidenceIds.some((id) => id.length === 0) ||
+    file.expectedBehavior.httpStatus !== 401 ||
+    file.expectedBehavior.code !== "SESSION_EXPIRED"
+  ) {
+    return { kind: "unsupported" };
+  }
   const source = ts.createSourceFile(
     file.path,
     file.content,

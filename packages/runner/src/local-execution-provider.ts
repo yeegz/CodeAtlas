@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   access,
   chmod,
@@ -16,6 +16,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import {
   accessSync,
   constants as fsConstants,
@@ -44,7 +45,10 @@ import {
   requiresStructuredReporter,
   unexecutedGeneratedTests,
 } from "./vitest-result.js";
-import { trustedVitestReporterSource } from "./trusted-vitest-reporter.js";
+import {
+  trustedVitestReporterSource,
+  verifyTrustedVitestReport,
+} from "./trusted-vitest-reporter.js";
 
 const RUNNER_VERSION = "0.1.0";
 const EXCLUDED_COPY_NAMES = new Set(["node_modules", "coverage", ".git"]);
@@ -142,6 +146,8 @@ export class LocalExecutionProvider implements ExecutionProvider {
     let snapshotCopy: string | null = null;
     let controlRoot: string | null = null;
     let childPid: number | undefined;
+    let resultArtifact: BoundArtifact | null = null;
+    let coverageArtifact: BoundArtifact | null = null;
     let stdout = "";
     let stderr = "";
 
@@ -187,20 +193,46 @@ export class LocalExecutionProvider implements ExecutionProvider {
         controlRoot,
         `vitest-result-${randomUUID()}.json`,
       );
+      resultArtifact = await precreateBoundArtifact(resultPath);
       const useTrustedReporter = requiresStructuredReporter(
         request.generatedFiles,
       );
+      const reportNonce = randomUUID();
+      const reportKey = randomBytes(32).toString("hex");
       const reporterPath = useTrustedReporter
         ? join(controlRoot, `vitest-reporter-${randomUUID()}.mjs`)
         : null;
-      if (reporterPath !== null) {
-        await writeFile(reporterPath, trustedVitestReporterSource(resultPath), {
-          mode: 0o600,
-        });
-      }
+      const trustedConfigPath = useTrustedReporter
+        ? join(controlRoot, `vitest-config-${randomUUID()}.mjs`)
+        : null;
       const coverageDirectory = join(controlRoot, `coverage-${randomUUID()}`);
       await mkdir(coverageDirectory, { mode: 0o700 });
       const coveragePath = join(coverageDirectory, "coverage-final.json");
+      const trustedCoveragePath = useTrustedReporter
+        ? join(controlRoot, `trusted-coverage-${randomUUID()}.json`)
+        : null;
+      if (trustedCoveragePath !== null) {
+        coverageArtifact = await precreateBoundArtifact(trustedCoveragePath);
+      }
+      if (reporterPath !== null && trustedCoveragePath !== null) {
+        await writeFile(
+          reporterPath,
+          trustedVitestReporterSource(
+            resultPath,
+            trustedCoveragePath,
+            reportNonce,
+            reportKey,
+          ),
+          { encoding: "utf8", flag: "wx", mode: 0o600 },
+        );
+      }
+      if (trustedConfigPath !== null) {
+        await writeFile(
+          trustedConfigPath,
+          "export default { test: { setupFiles: [] } };\n",
+          { encoding: "utf8", flag: "wx", mode: 0o600 },
+        );
+      }
       const outputState = { bytes: 0, exceeded: false };
       const outputTransform = () => ({
         binary: true as const,
@@ -245,6 +277,9 @@ export class LocalExecutionProvider implements ExecutionProvider {
           `--root=${snapshotCopy}`,
           `--reporter=${reporterPath ?? "json"}`,
           `--outputFile=${resultPath}`,
+          ...(trustedConfigPath === null
+            ? []
+            : [`--config=${trustedConfigPath}`]),
           "--coverage.enabled",
           "--coverage.provider=v8",
           "--coverage.reporter=json",
@@ -310,7 +345,10 @@ export class LocalExecutionProvider implements ExecutionProvider {
       }
 
       const remainingBytes = request.policy.maxOutputBytes - outputState.bytes;
-      const resultFile = await readFreshRegularFile(resultPath, remainingBytes);
+      const resultFile = await readBoundArtifact(
+        resultArtifact,
+        remainingBytes,
+      );
       if (resultFile.kind !== "ok") {
         return buildResult(request, runtime, startedAt, {
           terminalState:
@@ -323,10 +361,10 @@ export class LocalExecutionProvider implements ExecutionProvider {
 
       const coverageBytes =
         remainingBytes - Buffer.byteLength(resultFile.content);
-      const coverageFile = await readFreshRegularFile(
-        coveragePath,
-        coverageBytes,
-      );
+      const coverageFile =
+        coverageArtifact === null
+          ? await readFreshRegularFile(coveragePath, coverageBytes)
+          : await readBoundArtifact(coverageArtifact, coverageBytes);
       if (coverageFile.kind !== "ok") {
         return buildResult(request, runtime, startedAt, {
           terminalState:
@@ -339,7 +377,20 @@ export class LocalExecutionProvider implements ExecutionProvider {
         });
       }
 
-      const parsed = parseVitestResult(resultFile.content, {
+      const verifiedResult = useTrustedReporter
+        ? verifyTrustedVitestReport(resultFile.content, reportNonce, reportKey)
+        : resultFile.content;
+      if (verifiedResult === null) {
+        return buildResult(request, runtime, startedAt, {
+          terminalState: "FAILED",
+          exitCode: execution.exitCode,
+          stdout,
+          stderr: [stderr, "Trusted Vitest report authentication failed"]
+            .filter(Boolean)
+            .join("\n"),
+        });
+      }
+      const parsed = parseVitestResult(verifiedResult, {
         snapshotRoot: snapshotCopy,
         requestedTestPaths,
         generatedFiles: request.generatedFiles,
@@ -377,6 +428,8 @@ export class LocalExecutionProvider implements ExecutionProvider {
       });
     } finally {
       await terminateProcessTree(childPid);
+      await resultArtifact?.handle.close();
+      await coverageArtifact?.handle.close();
       if (attemptRoot !== null) {
         await rm(attemptRoot, { recursive: true, force: true });
       }
@@ -708,6 +761,73 @@ async function assertPrivateDependencyLinks(
   await visit(privateNodeModules);
 }
 
+interface BoundArtifact {
+  path: string;
+  handle: FileHandle;
+  device: number | bigint;
+  inode: number | bigint;
+}
+
+async function precreateBoundArtifact(path: string): Promise<BoundArtifact> {
+  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+  const handle = await open(
+    path,
+    fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_RDWR | noFollow,
+    0o600,
+  );
+  const info = await handle.stat();
+  if (!info.isFile()) {
+    await handle.close();
+    throw new Error("Control artifact is not a regular file");
+  }
+  return { path, handle, device: info.dev, inode: info.ino };
+}
+
+async function readBoundArtifact(
+  artifact: BoundArtifact,
+  maxBytes: number,
+): Promise<
+  | { kind: "ok"; content: string }
+  | { kind: "missing" }
+  | { kind: "output-limit" }
+> {
+  try {
+    const [descriptorInfo, pathInfo] = await Promise.all([
+      artifact.handle.stat(),
+      lstat(artifact.path),
+    ]);
+    if (
+      !descriptorInfo.isFile() ||
+      !pathInfo.isFile() ||
+      pathInfo.isSymbolicLink() ||
+      descriptorInfo.dev !== artifact.device ||
+      descriptorInfo.ino !== artifact.inode ||
+      pathInfo.dev !== artifact.device ||
+      pathInfo.ino !== artifact.inode
+    ) {
+      return { kind: "missing" };
+    }
+    if (descriptorInfo.size === 0) return { kind: "missing" };
+    if (descriptorInfo.size > maxBytes) return { kind: "output-limit" };
+    const content = Buffer.alloc(descriptorInfo.size);
+    const { bytesRead } = await artifact.handle.read(
+      content,
+      0,
+      descriptorInfo.size,
+      0,
+    );
+    if (bytesRead !== descriptorInfo.size) return { kind: "missing" };
+    return content.byteLength <= maxBytes
+      ? { kind: "ok", content: content.toString("utf8") }
+      : { kind: "output-limit" };
+  } catch (error) {
+    if (isNotFound(error) || isSymlinkOpenError(error)) {
+      return { kind: "missing" };
+    }
+    throw error;
+  }
+}
+
 async function readFreshRegularFile(
   path: string,
   maxBytes: number,
@@ -716,7 +836,7 @@ async function readFreshRegularFile(
   | { kind: "missing" }
   | { kind: "output-limit" }
 > {
-  let handle;
+  let handle: FileHandle | undefined;
   try {
     const noFollow = fsConstants.O_NOFOLLOW ?? 0;
     handle = await open(path, fsConstants.O_RDONLY | noFollow);

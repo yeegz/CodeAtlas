@@ -8,5 +8,11 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     }
+  },
+  "dependencies": {
+    "@codeatlas/analyzer": "workspace:*",
+    "@codeatlas/evidence": "workspace:*",
+    "@codeatlas/runner": "workspace:*",
+    "@codeatlas/selector": "workspace:*"
   }
 }

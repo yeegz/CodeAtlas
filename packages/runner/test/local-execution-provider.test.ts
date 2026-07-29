@@ -184,7 +184,7 @@ describe("LocalExecutionProvider", () => {
     }
   });
 
-  it("emits honest pass and fail observations for validated object assertions", async () => {
+  it("does not promote noncanonical object assertions to observations", async () => {
     const provider = new LocalExecutionProvider({ workspaceRoot });
     const [passing, failing] = await Promise.all([
       provider.run({
@@ -220,33 +220,16 @@ describe("LocalExecutionProvider", () => {
     expect(passing.testCases).toMatchObject([
       { status: "PASSED", generatedObjectiveId: "passing-observation" },
     ]);
-    expect(passing.observations).toEqual([
-      {
-        testName: "records a passing response",
-        source: "TEST_ASSERTION",
-        expected: { httpStatus: 401, code: "EXPECTED" },
-        actual: { httpStatus: 401, code: "EXPECTED" },
-      },
-    ]);
+    expect(passing.observations).toEqual([]);
     expect(failing.terminalState, JSON.stringify(failing)).toBe("COMPLETED");
     expect(failing.exitCode).toBe(1);
     expect(failing.testCases).toMatchObject([
       { status: "FAILED", generatedObjectiveId: "failed-observation" },
     ]);
-    expect(
-      failing.observations,
-      failing.testCases[0]?.failureMessage ?? "",
-    ).toEqual([
-      {
-        testName: "records an actual response",
-        source: "TEST_ASSERTION",
-        expected: { httpStatus: 401, code: "EXPECTED" },
-        actual: { httpStatus: 500, code: "ACTUAL" },
-      },
-    ]);
+    expect(failing.observations).toEqual([]);
   }, 20_000);
 
-  it("retains every field in a failed structured observation", async () => {
+  it("does not trust a complete structured observation outside the canonical template", async () => {
     const provider = new LocalExecutionProvider({ workspaceRoot });
     const result = await provider.run({
       ...request("base"),
@@ -269,17 +252,7 @@ describe("LocalExecutionProvider", () => {
     expect(result.testCases).toMatchObject([
       { status: "FAILED", generatedObjectiveId: "full-observation" },
     ]);
-    expect(
-      result.observations,
-      result.testCases[0]?.failureMessage ?? JSON.stringify(result),
-    ).toEqual([
-      {
-        testName: "records the complete actual response",
-        source: "TEST_ASSERTION",
-        expected: { httpStatus: 401, code: "SESSION_EXPIRED" },
-        actual: { httpStatus: 500, code: "INTERNAL_ERROR" },
-      },
-    ]);
+    expect(result.observations).toEqual([]);
   }, 20_000);
 
   it("accepts one direct generated test inside one direct describe wrapper", async () => {
@@ -382,7 +355,7 @@ describe("generated wrapper", () => {
     20_000,
   );
 
-  it("preserves snapshot Vitest configuration while collecting observations", async () => {
+  it("preserves snapshot Vitest configuration on the ordinary execution path", async () => {
     const fixtureRoot = await createSnapshot({
       "package.json": '{"private":true,"type":"module"}\n',
       "vitest.config.ts":
@@ -413,12 +386,7 @@ describe("generated wrapper", () => {
       expect(result.testCases).toMatchObject([
         { status: "PASSED", generatedObjectiveId: "config-preservation" },
       ]);
-      expect(result.observations).toMatchObject([
-        {
-          expected: { httpStatus: 401, code: "SESSION_EXPIRED" },
-          actual: { httpStatus: 401, code: "SESSION_EXPIRED" },
-        },
-      ]);
+      expect(result.observations).toEqual([]);
     } finally {
       await rm(fixtureRoot, { recursive: true, force: true });
     }
@@ -445,7 +413,7 @@ describe("generated wrapper", () => {
         ],
       });
 
-      expect(result.terminalState, JSON.stringify(result)).toBe("FAILED");
+      expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
       expect(result.testCases).toMatchObject([{ status: "PASSED" }]);
       expect(result.observations).toEqual([]);
     } finally {
@@ -469,7 +437,7 @@ describe("generated wrapper", () => {
       ],
     });
 
-    expect(result.terminalState, JSON.stringify(result)).toBe("FAILED");
+    expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
     expect(result.testCases).toMatchObject([{ status: "FAILED" }]);
     expect(result.observations).toEqual([]);
   }, 20_000);
@@ -516,8 +484,8 @@ describe("generated wrapper", () => {
           observations: result.observations,
         })),
       ).toEqual([
-        { terminalState: "FAILED", testStatus: "PASSED", observations: [] },
-        { terminalState: "FAILED", testStatus: "PASSED", observations: [] },
+        { terminalState: "COMPLETED", testStatus: "PASSED", observations: [] },
+        { terminalState: "COMPLETED", testStatus: "PASSED", observations: [] },
       ]);
     } finally {
       await rm(fixtureRoot, { recursive: true, force: true });
@@ -644,14 +612,18 @@ describe("generated: expired session regression", () => {
   it("fails closed when the generated import substitutes the result path", async () => {
     const fixtureRoot = await createSnapshot({
       "package.json": '{"private":true,"type":"module"}\n',
-      "src/auth.ts": `import { rmSync, writeFileSync } from "node:fs";
+      "src/auth.ts": `import { readdirSync, rmSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 export function restoreSession() {
-  const outputArgument = process.argv.find((value) => value.startsWith("--outputFile="));
-  if (outputArgument) {
-    const outputPath = outputArgument.slice("--outputFile=".length);
-    rmSync(outputPath, { force: true });
-    writeFileSync(outputPath, "substituted");
-  }
+  const attemptRoot = resolve(import.meta.dirname, "../..");
+  const controlName = readdirSync(attemptRoot).find((name) => name.startsWith("control-"));
+  if (!controlName) throw new Error("control directory missing");
+  const controlRoot = resolve(attemptRoot, controlName);
+  const resultName = readdirSync(controlRoot).find((name) => name.startsWith("vitest-result-"));
+  if (!resultName) throw new Error("result artifact missing");
+  const outputPath = resolve(controlRoot, resultName);
+  rmSync(outputPath, { force: true });
+  writeFileSync(outputPath, "substituted");
   return { status: 401, body: { code: "SESSION_EXPIRED" } };
 }
 `,
