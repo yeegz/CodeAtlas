@@ -373,6 +373,29 @@ describe("generated wrapper", () => {
     expect(result.observations).toEqual([]);
   }, 20_000);
 
+  it("preserves snapshot Vitest configuration while collecting observations", async () => {
+    const fixtureRoot = await createSnapshot({
+      "package.json": '{"private":true,"type":"module"}\n',
+      "vitest.config.ts":
+        'export default { test: { setupFiles: ["./test/setup.ts"] } };\n',
+      "src/source.ts": "export const value = 1;\n",
+      "test/setup.ts": "globalThis.fixtureSetupRan = true;\n",
+      "test/config.test.ts":
+        'import { expect, it } from "vitest";\nit("uses snapshot setup", () => { expect(globalThis.fixtureSetupRan).toBe(true); });\n',
+    });
+    try {
+      const provider = new LocalExecutionProvider({ workspaceRoot });
+      const result = await provider.run(
+        await snapshotRequest(fixtureRoot, ["test/config.test.ts"]),
+      );
+
+      expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+      expect(result.testCases).toMatchObject([{ status: "PASSED" }]);
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it("fails closed when a generated assertion imports a non-Vitest expect", async () => {
     const fixtureRoot = await createSnapshot({
       "package.json": '{"private":true,"type":"module"}\n',
