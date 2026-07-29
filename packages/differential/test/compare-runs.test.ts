@@ -10,10 +10,7 @@ import type { GeneratedTest, TestObjective } from "@codeatlas/generator";
 import type { ExecutionResult } from "@codeatlas/runner";
 import type { SelectionEdge } from "@codeatlas/selector";
 
-import {
-  compareRuns,
-  type ComparisonInput,
-} from "../src/index.js";
+import { compareRuns, type ComparisonInput } from "../src/index.js";
 
 const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
@@ -55,8 +52,7 @@ describe("compareRuns", () => {
           ],
           affectedJourney:
             "Returning user → Restore session → Validate expired token",
-          reproductionCommand:
-            "codeatlas replay finding_expired_session",
+          reproductionCommand: "codeatlas replay finding_expired_session",
           recommendedAction:
             "Restore the unconditional expiration guard or accept the changed behavior with a contract update",
           limitations: [],
@@ -105,7 +101,8 @@ describe("compareRuns", () => {
           code: "SERVICE_UNAVAILABLE",
         };
       },
-      limitation: "Differential observations were contradictory across repeats.",
+      limitation:
+        "Differential observations were contradictory across repeats.",
     },
     {
       name: "unexecuted generated test",
@@ -196,6 +193,30 @@ describe("compareRuns", () => {
     );
     expect(finding?.proofCard.limitations).toContain(
       "The base assertion did not pass, so this is a confirmed change rather than a confirmed regression.",
+    );
+  });
+
+  it("confirms an exact existing selected test from its structured expected behavior", () => {
+    const input = structuredClone(comparison()) as MutableComparison;
+    input.test = {
+      provenance: "EXISTING",
+      selection: {
+        testId: "test:auth",
+        path: generatedPath,
+        reasons: ["Reaches validateToken."],
+        evidenceIds: ["ev:contract"],
+      },
+    };
+    for (const pair of input.comparisons) {
+      pair.base.testCases[0]!.generatedObjectiveId = null;
+      pair.head.testCases[0]!.generatedObjectiveId = null;
+    }
+
+    const [finding] = compareRuns(input);
+
+    expect(finding?.state).toBe("CONFIRMED_REGRESSION");
+    expect(finding?.proofCard.baseBehavior).toBe(
+      "HTTP 401 with SESSION_EXPIRED",
     );
   });
 
@@ -345,9 +366,9 @@ function deepFreeze<T>(value: T): T {
 }
 
 type MutableComparison = {
-  -readonly [Key in keyof ComparisonInput]: ComparisonInput[Key] extends readonly (
-    infer Item
-  )[]
+  -readonly [
+    Key in keyof ComparisonInput
+  ]: ComparisonInput[Key] extends readonly (infer Item)[]
     ? Array<Mutable<Item>>
     : Mutable<ComparisonInput[Key]>;
 };

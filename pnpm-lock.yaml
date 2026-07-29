@@ -60,6 +60,24 @@ importers:
         specifier: 5.9.3
         version: 5.9.3
 
+  packages/differential:
+    dependencies:
+      '@codeatlas/analyzer':
+        specifier: workspace:*
+        version: link:../analyzer
+      '@codeatlas/evidence':
+        specifier: workspace:*
+        version: link:../evidence
+      '@codeatlas/generator':
+        specifier: workspace:*
+        version: link:../generator
+      '@codeatlas/runner':
+        specifier: workspace:*
+        version: link:../runner
+      '@codeatlas/selector':
+        specifier: workspace:*
+        version: link:../selector
+
   packages/evidence:
     dependencies:
       json-canonicalize:

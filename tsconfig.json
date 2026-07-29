@@ -6,6 +6,7 @@
     { "path": "./packages/analyzer" },
     { "path": "./packages/selector" },
     { "path": "./packages/runner" },
-    { "path": "./packages/generator" }
+    { "path": "./packages/generator" },
+    { "path": "./packages/differential" }
   ]
 }
