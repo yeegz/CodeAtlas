@@ -369,6 +369,41 @@ describe("compareRuns", () => {
     expect(FindingSchema.safeParse(finding).success).toBe(true);
   });
 
+  it.each([
+    {
+      name: "missing evidence",
+      mutate(input: Record<string, unknown>) {
+        delete input.evidenceItems;
+      },
+    },
+    {
+      name: "entirely malformed evidence",
+      mutate(input: Record<string, unknown>) {
+        input.evidenceItems = [null, {}, "not-evidence"];
+      },
+    },
+  ])("returns a frozen unverified finding for $name", ({ mutate }) => {
+    const input = structuredClone(comparison()) as unknown as Record<
+      string,
+      unknown
+    >;
+    mutate(input);
+
+    const findings = compareRuns(input as unknown as ComparisonInput);
+    const [finding] = findings;
+
+    expect(findings).toHaveLength(1);
+    expect(finding?.state).toBe("UNVERIFIED");
+    expect(finding?.proofCard.evidenceIds).toEqual([]);
+    expect(finding?.evidence).toEqual([]);
+    expect(finding?.proofCard.limitations).toContain(
+      "No usable evidence items were provided for this finding.",
+    );
+    expect(FindingSchema.safeParse(finding).success).toBe(true);
+    expect(Object.isFrozen(findings)).toBe(true);
+    expect(Object.isFrozen(finding)).toBe(true);
+  });
+
   it("explains identical repeated base and head failures", () => {
     const input = structuredClone(comparison()) as MutableComparison;
     for (const pair of input.comparisons) {
