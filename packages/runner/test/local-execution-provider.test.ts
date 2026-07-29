@@ -275,6 +275,27 @@ describe("LocalExecutionProvider", () => {
     }
   }, 20_000);
 
+  it("fails closed when a generated callback shadows the Vitest expect", async () => {
+    const provider = new LocalExecutionProvider({ workspaceRoot });
+    const result = await provider.run({
+      ...request("base"),
+      testPaths: [],
+      generatedFiles: [
+        {
+          ...generatedFile("test/shadowed-expect.generated.test.ts"),
+          content:
+            'import { expect, it } from "vitest";\nit("cannot shadow the assertion API", (expect) => {\n  const response = { status: 599, body: { code: "FORGED" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "EXPECTED" });\n});\n',
+          objectiveId: "shadowed-expect",
+          expectedBehavior: { httpStatus: 401, code: "EXPECTED" },
+        },
+      ],
+    });
+
+    expect(result.terminalState, JSON.stringify(result)).toBe("FAILED");
+    expect(result.testCases).toMatchObject([{ status: "FAILED" }]);
+    expect(result.observations).toEqual([]);
+  }, 20_000);
+
   it("does not emit an observation for a hand-thrown forged AssertionError", async () => {
     const provider = new LocalExecutionProvider({ workspaceRoot });
     const result = await provider.run({
