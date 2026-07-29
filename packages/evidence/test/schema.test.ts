@@ -110,6 +110,36 @@ describe("evidence provenance", () => {
     expect(result.success).toBe(false);
   });
 
+  it("rejects AI-only Proof Card citations backed by unrelated differential evidence", () => {
+    const result = FindingSchema.safeParse({
+      id: "finding_1",
+      state: "CONFIRMED_REGRESSION",
+      title: "Login regression",
+      summary: "Authentication changed",
+      proofCard: { ...proofCard, evidenceIds: ["ev_ai"] },
+      evidence: [
+        {
+          id: "ev_ai",
+          type: "AI_INFERENCE",
+          reproducibility: "NOT_REPRODUCIBLE",
+          baseSha: "a".repeat(40),
+          headSha: "b".repeat(40),
+          executions: { base: 0, head: 0 },
+        },
+        {
+          id: "ev_diff",
+          type: "DIFFERENTIAL_EXECUTION",
+          reproducibility: "REPRODUCIBLE",
+          baseSha: "a".repeat(40),
+          headSha: "b".repeat(40),
+          executions: { base: 1, head: 1 },
+        },
+      ],
+    });
+
+    expect(result.success).toBe(false);
+  });
+
   it("preserves structured evidence for lesser finding states", () => {
     const finding = FindingSchema.parse({
       id: "finding_1",
@@ -241,6 +271,103 @@ describe("evidence provenance", () => {
     });
 
     expect(result.success).toBe(false);
+  });
+
+  it("rejects an executed generated test as the sole confirmation evidence", () => {
+    const result = ChangePassportSchema.safeParse({
+      baseSha: "a".repeat(40),
+      headSha: "b".repeat(40),
+      engineVersion: "0.1.0",
+      findings: [
+        {
+          id: "finding_1",
+          state: "CONFIRMED_REGRESSION",
+          title: "Login regression",
+          summary: "Authentication changed",
+          proofCard: { ...proofCard, evidenceIds: ["ev_diff"] },
+          evidence: [
+            {
+              id: "ev_diff",
+              type: "DIFFERENTIAL_EXECUTION",
+              reproducibility: "REPRODUCIBLE",
+              baseSha: "a".repeat(40),
+              headSha: "b".repeat(40),
+              executions: { base: 1, head: 1 },
+              testExecutionId: "generated_1",
+            },
+          ],
+        },
+      ],
+      executedTests: [
+        {
+          id: "generated_1",
+          command: "pnpm vitest run generated/login.test.ts",
+          provenance: "GENERATED",
+          executedOnBase: true,
+          executedOnHead: true,
+          evidenceIds: ["ev_diff"],
+        },
+      ],
+      unverifiedAreas: [],
+      retentionPolicy: "30 days",
+      manifestDigest: `sha256:${"d".repeat(64)}`,
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts executed generated confirmation evidence with cited independent corroboration", () => {
+    const result = ChangePassportSchema.safeParse({
+      baseSha: "a".repeat(40),
+      headSha: "b".repeat(40),
+      engineVersion: "0.1.0",
+      findings: [
+        {
+          id: "finding_1",
+          state: "CONFIRMED_REGRESSION",
+          title: "Login regression",
+          summary: "Authentication changed",
+          proofCard: {
+            ...proofCard,
+            evidenceIds: ["ev_diff", "ev_static"],
+          },
+          evidence: [
+            {
+              id: "ev_diff",
+              type: "DIFFERENTIAL_EXECUTION",
+              reproducibility: "REPRODUCIBLE",
+              baseSha: "a".repeat(40),
+              headSha: "b".repeat(40),
+              executions: { base: 1, head: 1 },
+              testExecutionId: "generated_1",
+            },
+            {
+              id: "ev_static",
+              type: "STATIC_DATAFLOW",
+              reproducibility: "REPRODUCIBLE",
+              baseSha: "a".repeat(40),
+              headSha: "b".repeat(40),
+              executions: { base: 0, head: 0 },
+            },
+          ],
+        },
+      ],
+      executedTests: [
+        {
+          id: "generated_1",
+          command: "pnpm vitest run generated/login.test.ts",
+          provenance: "GENERATED",
+          executedOnBase: true,
+          executedOnHead: true,
+          evidenceIds: ["ev_diff"],
+        },
+      ],
+      unverifiedAreas: [],
+      retentionPolicy: "30 days",
+      manifestDigest: `sha256:${"d".repeat(64)}`,
+    });
+
+    expect(result.success).toBe(true);
   });
 
   it("rejects finding evidence from revisions outside the Passport", () => {
