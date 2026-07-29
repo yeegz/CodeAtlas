@@ -124,7 +124,7 @@ it("sorts canonical inventory and renders JSON and Markdown from that object", (
   ]);
   expect(passport.evidenceIds).toEqual(["ev:differential", "ev:static"]);
   expect(JSON.parse(json)).toEqual(passport);
-  expect(markdown).toContain("Overall state: ACTION_REQUIRED");
+  expect(markdown).toContain("Overall state: INCOMPLETE");
   expect(markdown).toContain("codeatlas replay finding_expired_session");
   expect(markdown).toContain(manifestDigest);
 });
