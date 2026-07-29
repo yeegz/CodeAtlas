@@ -18,6 +18,16 @@ export interface TestGenerator {
   generate(objective: TestObjective): Promise<TestGenerationResult>;
 }
 
+const GENERATED_TEST_FIELDS = [
+  "content",
+  "evidenceIds",
+  "executed",
+  "expectedBehavior",
+  "generated",
+  "objectiveId",
+  "path",
+] as const;
+
 const EXPIRED_SESSION_TEST = `import { describe, expect, it } from "vitest";
 import { restoreSession } from "../src/auth.js";
 
@@ -42,23 +52,73 @@ export class TemplateTestGenerator implements TestGenerator {
       });
     }
 
-    const evidenceIds = Object.freeze([...objective.evidenceIds]) as string[];
-    const expectedBehavior = Object.freeze({
-      httpStatus: 401 as const,
-      code: "SESSION_EXPIRED" as const,
-    });
-    const test = Object.freeze({
-      path: "test/codeatlas.expired-session.test.ts",
-      content: EXPIRED_SESSION_TEST,
-      objectiveId: objective.id,
-      evidenceIds,
-      expectedBehavior,
-      generated: true as const,
-      executed: false as const,
-    });
+    const test = expectedGeneratedTest(objective);
 
     return Object.freeze({ state: "GENERATED" as const, test });
   }
+}
+
+export function validateGeneratedTest(
+  objective: TestObjective,
+  value: unknown,
+): GeneratedTest {
+  if (!supportsExpiredSessionObjective(objective)) {
+    throw new TypeError("Generated test objective is not supported");
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("Generated test candidate must be an object");
+  }
+  const candidate = value as Record<string, unknown>;
+  const fields = Object.keys(candidate).sort();
+  if (
+    fields.length !== GENERATED_TEST_FIELDS.length ||
+    fields.some((field, index) => field !== GENERATED_TEST_FIELDS[index])
+  ) {
+    throw new TypeError("Generated test candidate has unexpected fields");
+  }
+  const expected = expectedGeneratedTest(objective);
+  const evidenceIds = candidate.evidenceIds;
+  const behavior = candidate.expectedBehavior;
+  if (
+    candidate.path !== expected.path ||
+    candidate.content !== expected.content ||
+    candidate.objectiveId !== expected.objectiveId ||
+    candidate.generated !== true ||
+    candidate.executed !== false ||
+    !Array.isArray(evidenceIds) ||
+    evidenceIds.length !== expected.evidenceIds.length ||
+    evidenceIds.some(
+      (evidenceId, index) => evidenceId !== expected.evidenceIds[index],
+    ) ||
+    typeof behavior !== "object" ||
+    behavior === null ||
+    Array.isArray(behavior) ||
+    Object.keys(behavior).sort().join("\0") !== "code\0httpStatus" ||
+    (behavior as Record<string, unknown>).httpStatus !== 401 ||
+    (behavior as Record<string, unknown>).code !== "SESSION_EXPIRED"
+  ) {
+    throw new TypeError(
+      "Generated test candidate does not match the canonical objective template",
+    );
+  }
+  return expected;
+}
+
+function expectedGeneratedTest(objective: TestObjective): GeneratedTest {
+  const evidenceIds = Object.freeze([...objective.evidenceIds]) as string[];
+  const expectedBehavior = Object.freeze({
+    httpStatus: 401 as const,
+    code: "SESSION_EXPIRED" as const,
+  });
+  return Object.freeze({
+    path: "test/codeatlas.expired-session.test.ts",
+    content: EXPIRED_SESSION_TEST,
+    objectiveId: objective.id,
+    evidenceIds,
+    expectedBehavior,
+    generated: true as const,
+    executed: false as const,
+  });
 }
 
 function supportsExpiredSessionObjective(objective: TestObjective): boolean {

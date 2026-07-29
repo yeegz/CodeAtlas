@@ -1,5 +1,6 @@
 export {
   analyzeComparison,
+  deriveObjectiveCoverage,
   deriveSelectionEdges,
 } from "./analyze-comparison.js";
 export { LocalArtifactStore } from "./local-artifact-store.js";

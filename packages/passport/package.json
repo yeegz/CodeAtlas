@@ -13,6 +13,7 @@
     "@codeatlas/analyzer": "workspace:*",
     "@codeatlas/evidence": "workspace:*",
     "@codeatlas/runner": "workspace:*",
-    "json-canonicalize": "2.0.0"
+    "json-canonicalize": "2.0.0",
+    "zod": "4.4.3"
   }
 }

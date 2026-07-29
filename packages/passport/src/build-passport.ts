@@ -2,9 +2,11 @@ import type { ChangedSymbol } from "@codeatlas/analyzer";
 import {
   ChangePassportSchema,
   FindingSchema,
+  SourceLocationSchema,
   TestExecutionSchema,
   type ChangePassport,
   type Finding,
+  type SourceLocation,
   type TestExecution,
 } from "@codeatlas/evidence";
 import {
@@ -12,6 +14,7 @@ import {
   type ExecutionResult,
 } from "@codeatlas/runner";
 import { canonicalize } from "json-canonicalize";
+import { z } from "zod";
 
 const INPUT_FIELDS = new Set([
   "baseSha",
@@ -39,14 +42,17 @@ export interface BuildPassportInput {
   manifestDigest: string;
 }
 
-export type PassportOverallState = "ACTION_REQUIRED" | "PARTIAL" | "VERIFIED";
+export type PassportOverallState =
+  "ACTION_REQUIRED" | "INCOMPLETE" | "VERIFIED";
 
 export interface PassportSummary {
   findings: {
     acceptedChanges: number;
     confirmedChanges: number;
     confirmedRegressions: number;
+    possibleImpacts: number;
     probableImpacts: number;
+    resolved: number;
     unverified: number;
   };
   runs: { base: number; completed: number; head: number; total: number };
@@ -62,6 +68,8 @@ export interface PassportChangedSymbol {
   id: string;
   name: string;
   path: string;
+  baseLocation: SourceLocation | null;
+  headLocation: SourceLocation | null;
   changedLines: number[];
   signatureChanged: boolean;
 }
@@ -73,7 +81,164 @@ export interface BuiltChangePassport extends ChangePassport {
   changedSymbols: PassportChangedSymbol[];
   evidenceIds: string[];
   replayCommands: string[];
+  runs: ExecutionResult[];
 }
+
+const SafeRelativePathSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) =>
+      !value.startsWith("/") &&
+      !value.startsWith("\\") &&
+      !/^[A-Za-z]:/u.test(value) &&
+      !value.split(/[\\/]/u).includes(".."),
+    "path must be repository-relative and traversal-free",
+  );
+
+const PassportChangedSymbolSchema = z.strictObject({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  path: SafeRelativePathSchema,
+  baseLocation: SourceLocationSchema.nullable(),
+  headLocation: SourceLocationSchema.nullable(),
+  changedLines: z.array(z.number().int().positive()),
+  signatureChanged: z.boolean(),
+});
+
+const PassportSummarySchema = z.strictObject({
+  findings: z.strictObject({
+    acceptedChanges: z.number().int().nonnegative(),
+    confirmedChanges: z.number().int().nonnegative(),
+    confirmedRegressions: z.number().int().nonnegative(),
+    possibleImpacts: z.number().int().nonnegative(),
+    probableImpacts: z.number().int().nonnegative(),
+    resolved: z.number().int().nonnegative(),
+    unverified: z.number().int().nonnegative(),
+  }),
+  runs: z.strictObject({
+    base: z.number().int().nonnegative(),
+    completed: z.number().int().nonnegative(),
+    head: z.number().int().nonnegative(),
+    total: z.number().int().nonnegative(),
+  }),
+  tests: z.strictObject({
+    executedOnBase: z.number().int().nonnegative(),
+    executedOnHead: z.number().int().nonnegative(),
+    generated: z.number().int().nonnegative(),
+    total: z.number().int().nonnegative(),
+  }),
+});
+
+const ExecutionResultSchema = z.custom<ExecutionResult>(
+  hasValidExecutionResultBinding,
+  "Execution result does not have a valid digest binding",
+);
+
+export const BuiltChangePassportSchema = z
+  .strictObject({
+    baseSha: z.string().regex(/^[0-9a-f]{40}$/u),
+    headSha: z.string().regex(/^[0-9a-f]{40}$/u),
+    engineVersion: z.string().min(1),
+    findings: z.array(FindingSchema),
+    executedTests: z.array(TestExecutionSchema),
+    unverifiedAreas: z.array(z.string().min(1)),
+    retentionPolicy: z.string().min(1),
+    manifestDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
+    overallState: z.enum(["ACTION_REQUIRED", "INCOMPLETE", "VERIFIED"]),
+    summary: PassportSummarySchema,
+    changedFiles: z.array(SafeRelativePathSchema),
+    changedSymbols: z.array(PassportChangedSymbolSchema),
+    evidenceIds: z.array(z.string().min(1)),
+    replayCommands: z.array(z.string().min(1)),
+    runs: z.array(ExecutionResultSchema),
+  })
+  .superRefine((passport, context) => {
+    const core = coreProjection(passport);
+    const coreResult = ChangePassportSchema.safeParse(core);
+    if (!coreResult.success) {
+      context.addIssue({
+        code: "custom",
+        message: "Built Passport does not satisfy the Change Passport schema",
+      });
+      return;
+    }
+    if (
+      passport.runs.some(
+        (run) =>
+          run.snapshotSha !==
+          (run.revision === "base" ? passport.baseSha : passport.headSha),
+      )
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["runs"],
+        message: "Execution result revision does not match the Passport",
+      });
+    }
+    const expectedSummary = summarize(coreResult.data, passport.runs);
+    const expectedState = deriveOverallState(
+      expectedSummary,
+      passport.unverifiedAreas,
+      passport.runs,
+    );
+    const expectedChangedFiles = uniqueSorted(
+      passport.changedSymbols.map(({ path }) => path),
+    );
+    const expectedEvidenceIds = uniqueSorted([
+      ...passport.findings.flatMap(({ proofCard }) => proofCard.evidenceIds),
+      ...passport.executedTests.flatMap(({ evidenceIds }) => evidenceIds),
+    ]);
+    const expectedReplayCommands = uniqueSorted(
+      passport.findings.map(({ proofCard }) => proofCard.reproductionCommand),
+    );
+    let expectedTests: TestExecution[];
+    let expectedSymbols: PassportChangedSymbol[];
+    try {
+      expectedTests = passport.executedTests
+        .map((test) => deriveExecutionState(test, passport.runs))
+        .sort((left, right) => compareText(left.id, right.id));
+      expectedSymbols = passport.changedSymbols
+        .map((symbol) =>
+          validateChangedSymbol(symbol as ChangedSymbol, {
+            baseSha: passport.baseSha,
+            headSha: passport.headSha,
+          }),
+        )
+        .sort(compareChangedSymbols);
+    } catch {
+      context.addIssue({
+        code: "custom",
+        message: "Built Passport derived evidence is invalid",
+      });
+      return;
+    }
+    const expectedUnverifiedAreas = uniqueSorted([
+      ...passport.unverifiedAreas,
+      ...passport.findings
+        .filter(({ state }) => state === "UNVERIFIED")
+        .flatMap(({ proofCard }) => proofCard.limitations),
+    ]);
+    const derivedFields = [
+      ["overallState", passport.overallState, expectedState],
+      ["summary", passport.summary, expectedSummary],
+      ["changedFiles", passport.changedFiles, expectedChangedFiles],
+      ["changedSymbols", passport.changedSymbols, expectedSymbols],
+      ["evidenceIds", passport.evidenceIds, expectedEvidenceIds],
+      ["replayCommands", passport.replayCommands, expectedReplayCommands],
+      ["executedTests", passport.executedTests, expectedTests],
+      ["unverifiedAreas", passport.unverifiedAreas, expectedUnverifiedAreas],
+    ] as const;
+    for (const [field, actual, expected] of derivedFields) {
+      if (canonicalize(actual) !== canonicalize(expected)) {
+        context.addIssue({
+          code: "custom",
+          path: [field],
+          message: `Built Passport ${field} is not derived from its evidence`,
+        });
+      }
+    }
+  });
 
 export function buildPassport(input: BuildPassportInput): BuiltChangePassport {
   assertExactInput(input);
@@ -96,13 +261,8 @@ export function buildPassport(input: BuildPassportInput): BuiltChangePassport {
     .map((test) => deriveExecutionState(test, runs))
     .sort((left, right) => compareText(left.id, right.id));
   const changedSymbols = input.changedSymbols
-    .map(validateChangedSymbol)
-    .sort(
-      (left, right) =>
-        compareText(left.path, right.path) ||
-        compareText(left.name, right.name) ||
-        compareText(left.id, right.id),
-    );
+    .map((symbol) => validateChangedSymbol(symbol, input))
+    .sort(compareChangedSymbols);
   const changedFiles = uniqueSorted(changedSymbols.map(({ path }) => path));
   const unverifiedAreas = uniqueSorted([
     ...input.unverifiedAreas,
@@ -122,17 +282,7 @@ export function buildPassport(input: BuildPassportInput): BuiltChangePassport {
     manifestDigest: input.manifestDigest,
   });
   const summary = summarize(core, runs);
-  const incompleteRun = runs.some(
-    ({ terminalState }) => terminalState !== "COMPLETED",
-  );
-  const overallState: PassportOverallState =
-    summary.findings.confirmedRegressions > 0
-      ? "ACTION_REQUIRED"
-      : summary.findings.unverified > 0 ||
-          unverifiedAreas.length > 0 ||
-          incompleteRun
-        ? "PARTIAL"
-        : "VERIFIED";
+  const overallState = deriveOverallState(summary, unverifiedAreas, runs);
   const evidenceIds = uniqueSorted([
     ...findings.flatMap(({ proofCard }) => proofCard.evidenceIds),
     ...tests.flatMap(({ evidenceIds: ids }) => ids),
@@ -141,15 +291,18 @@ export function buildPassport(input: BuildPassportInput): BuiltChangePassport {
     findings.map(({ proofCard }) => proofCard.reproductionCommand),
   );
 
-  return deepFreeze({
-    ...core,
-    overallState,
-    summary,
-    changedFiles,
-    changedSymbols,
-    evidenceIds,
-    replayCommands,
-  });
+  return deepFreeze(
+    validateBuiltPassport({
+      ...core,
+      overallState,
+      summary,
+      changedFiles,
+      changedSymbols,
+      evidenceIds,
+      replayCommands,
+      runs,
+    }),
+  );
 }
 
 export function passportToJson(passport: BuiltChangePassport): string {
@@ -195,15 +348,7 @@ export function passportToMarkdown(passport: BuiltChangePassport): string {
 function validateBuiltPassport(
   value: BuiltChangePassport,
 ): BuiltChangePassport {
-  ChangePassportSchema.parse(coreProjection(value));
-  if (
-    value.overallState !== "ACTION_REQUIRED" &&
-    value.overallState !== "PARTIAL" &&
-    value.overallState !== "VERIFIED"
-  ) {
-    throw new TypeError("Passport overallState is invalid");
-  }
-  return value;
+  return BuiltChangePassportSchema.parse(value) as BuiltChangePassport;
 }
 
 function coreProjection(value: BuiltChangePassport): ChangePassport {
@@ -265,25 +410,30 @@ function deriveExecutionState(
   };
 }
 
-function validateChangedSymbol(value: ChangedSymbol): PassportChangedSymbol {
+function validateChangedSymbol(
+  value: ChangedSymbol,
+  snapshots: Pick<BuildPassportInput, "baseSha" | "headSha">,
+): PassportChangedSymbol {
+  const parsed = PassportChangedSymbolSchema.parse(value);
   if (
-    typeof value?.id !== "string" ||
-    value.id.length === 0 ||
-    typeof value.name !== "string" ||
-    value.name.length === 0 ||
-    typeof value.path !== "string" ||
-    value.path.length === 0 ||
-    !Array.isArray(value.changedLines) ||
-    value.changedLines.some((line) => !Number.isSafeInteger(line) || line <= 0)
+    (parsed.baseLocation !== null &&
+      (parsed.baseLocation.path !== parsed.path ||
+        parsed.baseLocation.snapshotSha !== snapshots.baseSha)) ||
+    (parsed.headLocation !== null &&
+      (parsed.headLocation.path !== parsed.path ||
+        parsed.headLocation.snapshotSha !== snapshots.headSha))
   ) {
-    throw new TypeError("Changed symbol does not match the analyzer contract");
+    throw new TypeError(
+      "Changed symbol source location does not match its path and snapshot",
+    );
   }
   return {
-    id: value.id,
-    name: value.name,
-    path: value.path,
-    changedLines: [...new Set(value.changedLines)].sort((a, b) => a - b),
-    signatureChanged: value.signatureChanged,
+    ...parsed,
+    baseLocation:
+      parsed.baseLocation === null ? null : { ...parsed.baseLocation },
+    headLocation:
+      parsed.headLocation === null ? null : { ...parsed.headLocation },
+    changedLines: [...new Set(parsed.changedLines)].sort((a, b) => a - b),
   };
 }
 
@@ -298,7 +448,9 @@ function summarize(
       acceptedChanges: count("ACCEPTED_CHANGE"),
       confirmedChanges: count("CONFIRMED_CHANGE"),
       confirmedRegressions: count("CONFIRMED_REGRESSION"),
+      possibleImpacts: count("POSSIBLE_IMPACT"),
       probableImpacts: count("PROBABLE_IMPACT"),
+      resolved: count("RESOLVED"),
       unverified: count("UNVERIFIED"),
     },
     runs: {
@@ -322,6 +474,40 @@ function summarize(
       total: passport.executedTests.length,
     },
   };
+}
+
+function deriveOverallState(
+  summary: PassportSummary,
+  unverifiedAreas: readonly string[],
+  runs: readonly ExecutionResult[],
+): PassportOverallState {
+  if (
+    summary.findings.unverified > 0 ||
+    unverifiedAreas.length > 0 ||
+    runs.some(({ terminalState }) => terminalState !== "COMPLETED")
+  ) {
+    return "INCOMPLETE";
+  }
+  if (
+    summary.findings.confirmedRegressions > 0 ||
+    summary.findings.confirmedChanges > 0 ||
+    summary.findings.probableImpacts > 0 ||
+    summary.findings.possibleImpacts > 0
+  ) {
+    return "ACTION_REQUIRED";
+  }
+  return "VERIFIED";
+}
+
+function compareChangedSymbols(
+  left: PassportChangedSymbol,
+  right: PassportChangedSymbol,
+): number {
+  return (
+    compareText(left.path, right.path) ||
+    compareText(left.name, right.name) ||
+    compareText(left.id, right.id)
+  );
 }
 
 function assertExactInput(input: BuildPassportInput): void {

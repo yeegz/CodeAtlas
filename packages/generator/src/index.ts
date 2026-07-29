@@ -1,5 +1,8 @@
 export { deriveTestObjectives } from "./derive-objectives.js";
-export { TemplateTestGenerator } from "./template-generator.js";
+export {
+  TemplateTestGenerator,
+  validateGeneratedTest,
+} from "./template-generator.js";
 export type {
   DeriveTestObjectivesInput,
   TestObjective,

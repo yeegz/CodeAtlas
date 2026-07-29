@@ -19,7 +19,6 @@ import {
   type ExecutionComparison,
 } from "@codeatlas/differential";
 import {
-  ChangePassportSchema,
   EvidenceItemSchema,
   EvidenceManifestSchema,
   deriveAnalysisId,
@@ -31,11 +30,16 @@ import {
 } from "@codeatlas/evidence";
 import {
   deriveTestObjectives,
+  validateGeneratedTest,
   type GeneratedTest,
   type TestGenerator,
   type TestObjective,
 } from "@codeatlas/generator";
-import { buildPassport, type BuiltChangePassport } from "@codeatlas/passport";
+import {
+  BuiltChangePassportSchema,
+  buildPassport,
+  type BuiltChangePassport,
+} from "@codeatlas/passport";
 import {
   hasValidExecutionResultBinding,
   type ExecutionProvider,
@@ -96,7 +100,7 @@ export interface ReproductionBundle {
   commands: {
     base: string[];
     head: string[];
-    replay: string;
+    replay: string[];
   };
 }
 
@@ -151,14 +155,8 @@ export async function analyzeComparison(
     const expectedCanonical = canonicalizeJson(value);
     const expectedDigest = sha256Digest(expectedCanonical);
     const stored = await request.artifactStore.putJson(kind, value);
-    if (
-      stored.digest !== expectedDigest ||
-      typeof stored.path !== "string" ||
-      stored.path.length === 0 ||
-      stored.path.startsWith("/") ||
-      stored.path.includes("\\") ||
-      stored.path.split("/").includes("..")
-    ) {
+    const expectedPath = `.codeatlas/runs/${analysisId}/${kind}-sha256-${expectedDigest.slice(7)}.json`;
+    if (stored.digest !== expectedDigest || stored.path !== expectedPath) {
       throw new Error("Artifact digest or path mismatch");
     }
     const read = await request.artifactStore.readJson<unknown>(stored.path);
@@ -202,9 +200,9 @@ export async function analyzeComparison(
     request.executionProvider,
     executionRequest({
       analysisId,
-      revision: "head",
-      snapshotRoot: request.headRoot,
-      snapshotSha: headSha,
+      revision: "base",
+      snapshotRoot: request.baseRoot,
+      snapshotSha: baseSha,
       testPaths: selections.map(({ path }) => path),
       generatedFiles: [],
     }),
@@ -221,7 +219,7 @@ export async function analyzeComparison(
   const objectives = deriveTestObjectives({
     changedSymbols,
     branches: headAnalysis.branches,
-    coverage: coverageForObjectiveDerivation(
+    coverage: deriveObjectiveCoverage(
       initialCoverageRun.coverage,
       headAnalysis,
       changedSymbols,
@@ -244,10 +242,8 @@ export async function analyzeComparison(
         `Unsupported generated-test objective: ${generated.reason}`,
       );
     }
-    if (generated.test.objectiveId !== objective.id) {
-      throw new Error("Generated test does not match its objective");
-    }
-    generatedPairs.push({ objective, test: generated.test });
+    const test = validateGeneratedTest(objective, generated.test);
+    generatedPairs.push({ objective, test });
   }
   await store(
     "generated-tests",
@@ -391,17 +387,7 @@ export async function analyzeComparison(
     manifestDigest: signedManifest.digest,
   });
   await store("change-passport", passport, (value) => {
-    if (!isRecord(value)) throw new Error("Passport artifact schema mismatch");
-    ChangePassportSchema.parse({
-      baseSha: value.baseSha,
-      headSha: value.headSha,
-      engineVersion: value.engineVersion,
-      findings: value.findings,
-      executedTests: value.executedTests,
-      unverifiedAreas: value.unverifiedAreas,
-      retentionPolicy: value.retentionPolicy,
-      manifestDigest: value.manifestDigest,
-    });
+    BuiltChangePassportSchema.parse(value);
   });
 
   const command = [
@@ -413,6 +399,10 @@ export async function analyzeComparison(
       ...generatedPairs.map(({ test }) => test.path),
     ]),
   ];
+  const replayCommand = ["codeatlas", "replay", findings[0]!.id];
+  if (findings[0]!.proofCard.reproductionCommand !== replayCommand.join(" ")) {
+    throw new Error("Proof Card reproduction command is not canonical");
+  }
   const reproductionBundle: ReproductionBundle = {
     schemaVersion: "1.0",
     analysisId,
@@ -425,7 +415,7 @@ export async function analyzeComparison(
     commands: {
       base: [...command],
       head: [...command],
-      replay: findings[0]!.proofCard.reproductionCommand,
+      replay: replayCommand,
     },
   };
   validateReproductionBundle(reproductionBundle);
@@ -448,7 +438,7 @@ export async function analyzeComparison(
   };
 }
 
-function coverageForObjectiveDerivation(
+export function deriveObjectiveCoverage(
   coverage: ExecutionResult["coverage"],
   analysis: SnapshotAnalysis,
   changedSymbols: readonly ChangedSymbol[],
@@ -470,10 +460,8 @@ function coverageForObjectiveDerivation(
       );
     if (changedLines.length === 0) continue;
     const covered = byPath.get(branch.source.path) ?? new Set<number>();
-    if (!changedLines.every((line) => covered.has(line))) {
-      covered.delete(branch.source.startLine);
-      byPath.set(branch.source.path, covered);
-    }
+    covered.delete(branch.source.startLine);
+    byPath.set(branch.source.path, covered);
   }
   return [...byPath.entries()]
     .map(([path, lines]) => ({
@@ -688,24 +676,41 @@ function evidenceForComparison(
 function semanticExecutionProjection(
   comparisons: readonly ExecutionComparison[],
 ) {
+  const normalized = comparisons.map(({ base, head }) => ({
+    base: semanticRun(base),
+    head: semanticRun(head),
+  }));
+  normalized.sort(compareCanonical);
   return {
     repeatCount: comparisons.length,
-    comparisons: comparisons.map(({ base, head }) => ({
-      base: semanticRun(base),
-      head: semanticRun(head),
-    })),
+    comparisons: normalized,
   };
 }
 
 function semanticRun(run: ExecutionResult) {
+  const testCases = run.testCases.map((testCase) => ({ ...testCase }));
+  testCases.sort(compareCanonical);
+  const coverage = run.coverage.map((item) => ({
+    path: item.path,
+    coveredLines: [...new Set(item.coveredLines)].sort(
+      (left, right) => left - right,
+    ),
+  }));
+  coverage.sort(compareCanonical);
+  const observations = run.observations.map((observation) => ({
+    ...observation,
+    expected: { ...observation.expected },
+    actual: { ...observation.actual },
+  }));
+  observations.sort(compareCanonical);
   return {
     revision: run.revision,
     snapshotSha: run.snapshotSha,
     terminalState: run.terminalState,
     exitCode: run.exitCode,
-    testCases: run.testCases,
-    coverage: run.coverage,
-    observations: run.observations,
+    testCases,
+    coverage,
+    observations,
     environmentDigest: run.environmentDigest,
   };
 }
@@ -803,20 +808,17 @@ function validateSnapshotAnalysis(value: unknown, snapshotSha: string): void {
 
 function validateGeneratedTests(
   value: unknown,
-  expected: readonly { test: GeneratedTest }[],
+  expected: readonly { objective: TestObjective; test: GeneratedTest }[],
 ): void {
   if (!Array.isArray(value) || value.length !== expected.length) {
     throw new Error("Generated-test artifact schema mismatch");
   }
   for (const [index, item] of value.entries()) {
-    if (
-      !isRecord(item) ||
-      item.generated !== true ||
-      item.executed !== false ||
-      item.objectiveId !== expected[index]?.test.objectiveId
-    ) {
+    const pair = expected[index];
+    if (!pair) {
       throw new Error("Generated-test artifact schema mismatch");
     }
+    validateGeneratedTest(pair.objective, item);
   }
 }
 
@@ -855,8 +857,23 @@ function validateReproductionBundle(
     !/^[0-9a-f]{40}$/u.test(String(value.baseSha)) ||
     !/^[0-9a-f]{40}$/u.test(String(value.headSha)) ||
     !/^sha256:[0-9a-f]{64}$/u.test(String(value.manifestDigest)) ||
+    !Array.isArray(value.findingIds) ||
+    value.findingIds.some(
+      (findingId) => typeof findingId !== "string" || findingId.length === 0,
+    ) ||
     !Array.isArray(value.artifacts) ||
-    !isRecord(value.commands)
+    !isRecord(value.commands) ||
+    !Array.isArray(value.commands.base) ||
+    !Array.isArray(value.commands.head) ||
+    !Array.isArray(value.commands.replay) ||
+    value.commands.replay.length !== 3 ||
+    value.commands.replay[0] !== "codeatlas" ||
+    value.commands.replay[1] !== "replay" ||
+    value.commands.replay.some((part) => typeof part !== "string") ||
+    [...value.commands.base, ...value.commands.head].some(
+      (part) => typeof part !== "string",
+    ) ||
+    !value.findingIds.includes(value.commands.replay[2])
   ) {
     throw new Error("Reproduction bundle schema mismatch");
   }
@@ -866,10 +883,11 @@ function validateReproductionBundle(
     value.artifacts.some(
       (artifact) =>
         !isRecord(artifact) ||
-        typeof artifact.path !== "string" ||
-        artifact.path.startsWith("/") ||
-        artifact.path.includes("..") ||
-        !/^sha256:[0-9a-f]{64}$/u.test(String(artifact.digest)),
+        typeof artifact.kind !== "string" ||
+        !/^[a-z][a-z0-9-]{0,63}$/u.test(artifact.kind) ||
+        !/^sha256:[0-9a-f]{64}$/u.test(String(artifact.digest)) ||
+        artifact.path !==
+          `.codeatlas/runs/${value.analysisId}/${artifact.kind}-sha256-${String(artifact.digest).slice(7)}.json`,
     )
   ) {
     throw new Error("Reproduction bundle contains a secret or mutable path");
@@ -915,6 +933,10 @@ function canonicalizeJson(value: unknown): string {
     throw new TypeError("Value is not canonical JSON data");
   }
   return canonical;
+}
+
+function compareCanonical(left: unknown, right: unknown): number {
+  return compareText(canonicalizeJson(left), canonicalizeJson(right));
 }
 
 function sha256Hex(value: string): string {
