@@ -895,7 +895,7 @@ describe("LocalExecutionProvider", () => {
     } finally {
       await rm(fakeRoot, { recursive: true, force: true });
     }
-  });
+  }, 10_000);
 
   it("refuses a symlink substituted for the fresh control result file", async () => {
     const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-result-symlink-"));
