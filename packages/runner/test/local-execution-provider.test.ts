@@ -296,6 +296,56 @@ describe("LocalExecutionProvider", () => {
     expect(result.observations).toEqual([]);
   }, 20_000);
 
+  it("fails closed when type-only imports claim assertion provenance", async () => {
+    const fixtureRoot = await createSnapshot({
+      "package.json": '{"private":true,"type":"module"}\n',
+      "src/install-no-op-globals.ts":
+        'import { it as vitestIt } from "vitest";\nObject.assign(globalThis, { it: vitestIt, expect: () => ({ toEqual() {} }) });\n',
+    });
+    try {
+      const provider = new LocalExecutionProvider({ workspaceRoot });
+      const results = await Promise.all(
+        [
+          {
+            name: "type-only clause",
+            path: "test/type-only-clause.generated.test.ts",
+            declaration: 'import type { expect, it } from "vitest";',
+          },
+          {
+            name: "type-only specifier",
+            path: "test/type-only-specifier.generated.test.ts",
+            declaration: 'import { type expect, it } from "vitest";',
+          },
+        ].map(async ({ name, path, declaration }) =>
+          provider.run({
+            ...(await snapshotRequest(fixtureRoot, [])),
+            generatedFiles: [
+              {
+                ...generatedFile(path),
+                content: `import "../src/install-no-op-globals.ts";\n${declaration}\nit(${JSON.stringify(name)}, () => {\n  const response = { status: 599, body: { code: "FORGED" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "EXPECTED" });\n});\n`,
+                objectiveId: name,
+                expectedBehavior: { httpStatus: 401, code: "EXPECTED" },
+              },
+            ],
+          }),
+        ),
+      );
+
+      expect(
+        results.map((result) => ({
+          terminalState: result.terminalState,
+          testStatus: result.testCases[0]?.status,
+          observations: result.observations,
+        })),
+      ).toEqual([
+        { terminalState: "FAILED", testStatus: "PASSED", observations: [] },
+        { terminalState: "FAILED", testStatus: "PASSED", observations: [] },
+      ]);
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it("does not emit an observation for a hand-thrown forged AssertionError", async () => {
     const provider = new LocalExecutionProvider({ workspaceRoot });
     const result = await provider.run({
@@ -910,6 +960,36 @@ describe("LocalExecutionProvider", () => {
 
       expect(result.stdout).toContain("posix:<absolute-path>");
       expect(result.stdout).toContain("windows:<absolute-path>");
+      expect(result.stdout).not.toContain("folder with spaces");
+      expect(result.stdout).not.toContain("file.ts");
+      expect(result.stdout).not.toContain("after-marker");
+    } finally {
+      await rm(fakeRoot, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("redacts closing-delimiter-adjacent absolute paths", async () => {
+    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
+    try {
+      const fake = await createFakePnpm(fakeRoot, {
+        body: `console.log("bracket-posix]/tmp/folder with spaces/file.ts after-marker");\nconsole.log("bracket-windows]C:\\\\Temp\\\\folder with spaces\\\\file.ts after-marker");\nconsole.log("brace-posix}/tmp/folder with spaces/file.ts after-marker");\nconsole.log("brace-windows}C:\\\\Temp\\\\folder with spaces\\\\file.ts after-marker");\nconsole.log("paren-posix)/tmp/folder with spaces/file.ts after-marker");\nconsole.log("paren-windows)C:\\\\Temp\\\\folder with spaces\\\\file.ts after-marker");\nwriteResult("{ malformed");`,
+      });
+      const provider = new LocalExecutionProvider({
+        workspaceRoot,
+        pnpmPath: fake.cliPath,
+      });
+      const result = await provider.run(request("base"));
+
+      for (const prefix of [
+        "bracket-posix]",
+        "bracket-windows]",
+        "brace-posix}",
+        "brace-windows}",
+        "paren-posix)",
+        "paren-windows)",
+      ]) {
+        expect(result.stdout).toContain(`${prefix}<absolute-path>`);
+      }
       expect(result.stdout).not.toContain("folder with spaces");
       expect(result.stdout).not.toContain("file.ts");
       expect(result.stdout).not.toContain("after-marker");
