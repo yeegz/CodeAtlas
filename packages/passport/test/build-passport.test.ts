@@ -258,6 +258,33 @@ it.each([
 
 it.each([
   {
+    name: "top-level run field",
+    mutate(run: Record<string, unknown>) {
+      run.selfCertified = true;
+    },
+  },
+  {
+    name: "nested test-case field",
+    mutate(run: Record<string, unknown>) {
+      (run.testCases as Record<string, unknown>[])[0]!.selfCertified = true;
+    },
+  },
+])("exporters reject an unknown $name", ({ mutate }) => {
+  const fabricated = structuredClone(
+    buildPassport(passportInput()),
+  ) as unknown as Record<string, unknown>;
+  const run = (fabricated.runs as Record<string, unknown>[]).find(
+    ({ testCases }) => Array.isArray(testCases) && testCases.length > 0,
+  );
+  if (!run) throw new Error("fixture run is missing");
+  mutate(run);
+
+  expect(() => passportToJson(fabricated as never)).toThrow();
+  expect(() => passportToMarkdown(fabricated as never)).toThrow();
+});
+
+it.each([
+  {
     name: "traversal path",
     mutate(symbol: Record<string, unknown>) {
       symbol.path = "../escape.ts";

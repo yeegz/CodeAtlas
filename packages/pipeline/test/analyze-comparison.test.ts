@@ -1,11 +1,17 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
 import {
   chmod,
+  link as fsLink,
   lstat,
   mkdtemp,
+  mkdir,
+  open as fsOpen,
+  readFile,
   readdir,
+  realpath,
   rm,
   symlink,
+  unlink as fsUnlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -568,6 +574,161 @@ describe("LocalArtifactStore", () => {
       await rm(repositoryRoot, { recursive: true, force: true });
     }
   });
+
+  it("never unlinks a colliding temp path when exclusive open fails", async () => {
+    const repositoryRoot = await mkdtemp(join(tmpdir(), "codeatlas-store-"));
+    try {
+      const analysisId = `analysis_${"2".repeat(64)}`;
+      let collidingPath = "";
+      const fileSystem = injectedFileSystem({
+        async open(path, flags, mode) {
+          if (String(path).includes(".temporary-")) {
+            collidingPath = String(path);
+            await writeFile(collidingPath, "unowned", { mode: 0o600 });
+            throw fileSystemError("exclusive temp collision", "EEXIST");
+          }
+          return fsOpen(path, flags, mode);
+        },
+      });
+      const store = localStoreWithFileSystem(
+        repositoryRoot,
+        analysisId,
+        fileSystem,
+      );
+
+      await expect(store.putJson("record", { safe: true })).rejects.toThrow(
+        /exclusive temp collision/i,
+      );
+      expect(await readFile(collidingPath, "utf8")).toBe("unowned");
+    } finally {
+      await rm(repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans an owned temp even when parent revalidation fails", async () => {
+    const repositoryRoot = await mkdtemp(join(tmpdir(), "codeatlas-store-"));
+    try {
+      const analysisId = `analysis_${"3".repeat(64)}`;
+      const artifactDirectory = resolve(
+        repositoryRoot,
+        `.codeatlas/runs/${analysisId}`,
+      );
+      let tempCreated = false;
+      const fileSystem = injectedFileSystem({
+        async open(path, flags, mode) {
+          const handle = await fsOpen(path, flags, mode);
+          if (String(path).includes(".temporary-")) tempCreated = true;
+          return handle;
+        },
+        async realpath(path) {
+          if (tempCreated && String(path) === artifactDirectory) {
+            throw new Error("parent identity revalidation failed");
+          }
+          return realpath(path);
+        },
+      });
+      const store = localStoreWithFileSystem(
+        repositoryRoot,
+        analysisId,
+        fileSystem,
+      );
+
+      await expect(store.putJson("record", { safe: true })).rejects.toThrow(
+        /parent identity revalidation failed/i,
+      );
+      expect(await readdir(artifactDirectory)).not.toEqual(
+        expect.arrayContaining([expect.stringMatching(/\.temporary-/i)]),
+      );
+    } finally {
+      await rm(repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not unlink a substituted temp inode after publication fails", async () => {
+    const repositoryRoot = await mkdtemp(join(tmpdir(), "codeatlas-store-"));
+    try {
+      const analysisId = `analysis_${"4".repeat(64)}`;
+      let substitutedPath = "";
+      const fileSystem = injectedFileSystem({
+        async link(existingPath) {
+          substitutedPath = String(existingPath);
+          await fsUnlink(substitutedPath);
+          await writeFile(substitutedPath, "substitute", { mode: 0o600 });
+          throw new Error("publication failed after substitution");
+        },
+      });
+      const store = localStoreWithFileSystem(
+        repositoryRoot,
+        analysisId,
+        fileSystem,
+      );
+
+      await expect(store.putJson("record", { safe: true })).rejects.toThrow(
+        /publication failed after substitution/i,
+      );
+      expect(await readFile(substitutedPath, "utf8")).toBe("substitute");
+    } finally {
+      await rm(repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves a publication error after successful owned-temp cleanup", async () => {
+    const repositoryRoot = await mkdtemp(join(tmpdir(), "codeatlas-store-"));
+    try {
+      const analysisId = `analysis_${"5".repeat(64)}`;
+      let tempPath = "";
+      const fileSystem = injectedFileSystem({
+        async link(existingPath) {
+          tempPath = String(existingPath);
+          throw new Error("primary publication failure");
+        },
+      });
+      const store = localStoreWithFileSystem(
+        repositoryRoot,
+        analysisId,
+        fileSystem,
+      );
+
+      await expect(store.putJson("record", { safe: true })).rejects.toThrow(
+        /primary publication failure/i,
+      );
+      await expect(lstat(tempPath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves a publication error when owned-temp cleanup also fails", async () => {
+    const repositoryRoot = await mkdtemp(join(tmpdir(), "codeatlas-store-"));
+    try {
+      const analysisId = `analysis_${"6".repeat(64)}`;
+      let tempPath = "";
+      const fileSystem = injectedFileSystem({
+        async link(existingPath) {
+          tempPath = String(existingPath);
+          throw new Error("primary publication failure");
+        },
+        async unlink(path) {
+          if (String(path).includes(".temporary-")) {
+            throw new Error("secondary cleanup failure");
+          }
+          return fsUnlink(path);
+        },
+      });
+      const store = localStoreWithFileSystem(
+        repositoryRoot,
+        analysisId,
+        fileSystem,
+      );
+
+      await expect(store.putJson("record", { safe: true })).rejects.toThrow(
+        /primary publication failure/i,
+      );
+      expect((await lstat(tempPath)).isFile()).toBe(true);
+    } finally {
+      await rm(repositoryRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 it("completes once with the genuine local provider and authentication fixture", async () => {
@@ -753,6 +914,37 @@ class ReorderedExecutionProvider implements ExecutionProvider {
     void _digest;
     return { ...bound, resultDigest: computeExecutionResultDigest(bound) };
   }
+}
+
+const realFileSystem = {
+  open: fsOpen,
+  lstat,
+  mkdir,
+  realpath,
+  link: fsLink,
+  unlink: fsUnlink,
+};
+
+function injectedFileSystem(
+  overrides: Partial<typeof realFileSystem>,
+): typeof realFileSystem {
+  return { ...realFileSystem, ...overrides };
+}
+
+function localStoreWithFileSystem(
+  repositoryRoot: string,
+  analysisId: string,
+  fileSystem: typeof realFileSystem,
+): LocalArtifactStore {
+  return new LocalArtifactStore({
+    repositoryRoot,
+    analysisId,
+    fileSystem,
+  } as never);
+}
+
+function fileSystemError(message: string, code: string): Error {
+  return Object.assign(new Error(message), { code });
 }
 
 function canonicalizeForTest(value: unknown): string {

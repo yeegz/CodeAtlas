@@ -5,6 +5,7 @@ import {
   hasValidExecutionResultBinding,
   type BoundExecutionResult,
 } from "../src/index.js";
+import * as RunnerModule from "../src/index.js";
 
 const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
@@ -18,6 +19,91 @@ describe("execution result digest", () => {
     };
 
     expect(hasValidExecutionResultBinding(result)).toBe(true);
+  });
+
+  it.each([
+    {
+      name: "unknown top-level field",
+      mutate(value: Record<string, unknown>) {
+        value.untrusted = true;
+      },
+    },
+    {
+      name: "unknown test-case field",
+      mutate(value: Record<string, unknown>) {
+        (value.testCases as Record<string, unknown>[])[0]!.untrusted = true;
+      },
+    },
+    {
+      name: "unknown coverage field",
+      mutate(value: Record<string, unknown>) {
+        (value.coverage as Record<string, unknown>[])[0]!.untrusted = true;
+      },
+    },
+    {
+      name: "unknown observation field",
+      mutate(value: Record<string, unknown>) {
+        (value.observations as Record<string, unknown>[])[0]!.untrusted = true;
+      },
+    },
+    {
+      name: "unknown behavior field",
+      mutate(value: Record<string, unknown>) {
+        const observation = (
+          value.observations as Record<string, unknown>[]
+        )[0]!;
+        (observation.actual as Record<string, unknown>).untrusted = true;
+      },
+    },
+    {
+      name: "traversal test path",
+      mutate(value: Record<string, unknown>) {
+        (value.testCases as Record<string, unknown>[])[0]!.path =
+          "../escape.test.ts";
+      },
+    },
+    {
+      name: "absolute coverage path",
+      mutate(value: Record<string, unknown>) {
+        (value.coverage as Record<string, unknown>[])[0]!.path = "/tmp/auth.ts";
+      },
+    },
+    {
+      name: "non-integer covered line",
+      mutate(value: Record<string, unknown>) {
+        (value.coverage as Record<string, unknown>[])[0]!.coveredLines = ["17"];
+      },
+    },
+    {
+      name: "malformed execution id",
+      mutate(value: Record<string, unknown>) {
+        value.executionId = "execution-1";
+      },
+    },
+    {
+      name: "malformed digest",
+      mutate(value: Record<string, unknown>) {
+        value.resultDigest = "sha256:invalid";
+      },
+    },
+  ])("strictly rejects $name", ({ mutate }) => {
+    const bound = executionResult();
+    const candidate = structuredClone({
+      ...bound,
+      resultDigest: computeExecutionResultDigest(bound),
+    }) as unknown as Record<string, unknown>;
+    mutate(candidate);
+
+    expect("ExecutionResultSchema" in RunnerModule).toBe(true);
+    const schema = (
+      RunnerModule as unknown as {
+        ExecutionResultSchema: {
+          safeParse(value: unknown): { success: boolean };
+        };
+      }
+    ).ExecutionResultSchema;
+    expect(schema.safeParse(candidate).success).toBe(false);
+    expect(hasValidExecutionResultBinding(candidate)).toBe(false);
   });
 
   it("does not let a top-level toJSON hide a changed snapshot", () => {
