@@ -57,6 +57,7 @@ export interface LocalExecutionProviderOptions {
   /** @deprecated Use pnpmCliPath. This path must still be a JavaScript CLI, never a shim. */
   pnpmPath?: string;
   temporaryParent?: string;
+  platform?: NodeJS.Platform;
 }
 
 interface RuntimeIdentity {
@@ -70,6 +71,7 @@ export class LocalExecutionProvider implements ExecutionProvider {
   readonly #nodePath: string;
   readonly #pnpmCliPath: string;
   readonly #temporaryParent: string;
+  readonly #platform: NodeJS.Platform;
 
   constructor(options: LocalExecutionProviderOptions = {}) {
     this.#workspaceRoot = resolve(options.workspaceRoot ?? process.cwd());
@@ -78,10 +80,21 @@ export class LocalExecutionProvider implements ExecutionProvider {
       options.pnpmCliPath ?? options.pnpmPath,
     );
     this.#temporaryParent = resolve(options.temporaryParent ?? tmpdir());
+    this.#platform = options.platform ?? process.platform;
   }
 
   async run(request: ExecutionRequest): Promise<ExecutionResult> {
     validatePolicy(request.policy);
+    const startedAt = performance.now();
+    if (this.#platform === "win32") {
+      return buildResult(request, unsupportedRuntimeIdentity(), startedAt, {
+        terminalState: "FAILED",
+        exitCode: null,
+        stdout: "",
+        stderr:
+          "Unsupported platform win32: test execution requires a descendant containment boundary",
+      });
+    }
     const testPaths = request.testPaths.map((path) =>
       validateRelativePath(path, "test path"),
     );
@@ -113,7 +126,6 @@ export class LocalExecutionProvider implements ExecutionProvider {
       this.#nodePath,
       this.#pnpmCliPath,
     );
-    const startedAt = performance.now();
     let attemptRoot: string | null = null;
     let snapshotCopy: string | null = null;
     let controlRoot: string | null = null;
@@ -163,6 +175,9 @@ export class LocalExecutionProvider implements ExecutionProvider {
         controlRoot,
         `vitest-result-${randomUUID()}.json`,
       );
+      const coverageDirectory = join(controlRoot, `coverage-${randomUUID()}`);
+      await mkdir(coverageDirectory, { mode: 0o700 });
+      const coveragePath = join(coverageDirectory, "coverage-final.json");
       const outputState = { bytes: 0, exceeded: false };
       const outputTransform = () => ({
         binary: true as const,
@@ -210,6 +225,8 @@ export class LocalExecutionProvider implements ExecutionProvider {
           "--coverage.enabled",
           "--coverage.provider=v8",
           "--coverage.reporter=json",
+          "--coverage.reportOnFailure",
+          `--coverage.reportsDirectory=${coverageDirectory}`,
           ...requestedTestPaths,
         ],
         {
@@ -218,7 +235,7 @@ export class LocalExecutionProvider implements ExecutionProvider {
           maxBuffer: request.policy.maxOutputBytes,
           reject: false,
           extendEnv: false,
-          detached: process.platform !== "win32",
+          detached: true,
           cleanup: true,
           forceKillAfterDelay: 100,
           encoding: "buffer",
@@ -281,11 +298,31 @@ export class LocalExecutionProvider implements ExecutionProvider {
         });
       }
 
+      const coverageBytes =
+        remainingBytes - Buffer.byteLength(resultFile.content);
+      const coverageFile = await readFreshRegularFile(
+        coveragePath,
+        coverageBytes,
+      );
+      if (coverageFile.kind !== "ok") {
+        return buildResult(request, runtime, startedAt, {
+          terminalState:
+            coverageFile.kind === "output-limit" ? "OUTPUT_LIMIT" : "FAILED",
+          exitCode: execution.exitCode,
+          stdout,
+          stderr: [stderr, `Fresh coverage artifact was ${coverageFile.kind}`]
+            .filter(Boolean)
+            .join("\n"),
+        });
+      }
+
       const parsed = parseVitestResult(resultFile.content, {
         snapshotRoot: snapshotCopy,
         requestedTestPaths,
         generatedFiles: request.generatedFiles,
         allowedCoverage,
+        coverageArtifact: coverageFile.content,
+        exitCode: execution.exitCode,
       });
       const sanitizedParsed = sanitizeParsedResult(parsed, knownPaths);
       return buildResult(request, runtime, startedAt, {
@@ -322,6 +359,22 @@ export class LocalExecutionProvider implements ExecutionProvider {
       }
     }
   }
+}
+
+function unsupportedRuntimeIdentity(): RuntimeIdentity {
+  const environmentDigest = createHash("sha256")
+    .update(
+      JSON.stringify({
+        platform: "win32",
+        runnerVersion: RUNNER_VERSION,
+      }),
+    )
+    .digest("hex");
+  return {
+    nodeVersion: "unsupported",
+    pnpmVersion: "unsupported",
+    environmentDigest,
+  };
 }
 
 interface BuildResultValues {
@@ -828,7 +881,7 @@ function sanitizeOutput(
     (_whole, prefix: string, label: string) => `${prefix}${label}[REDACTED]`,
   );
   sanitized = sanitized.replace(
-    /(^|[\s("'=])((?:[A-Za-z]:[\\/]|\/)(?:[^\s:"'<>|]+[\\/])*[^\s:"'<>|]*)/gmu,
+    /(^|[\t ("'=])(?:[A-Za-z]:[\\/]|\/)[^\r\n]*/gmu,
     (_whole, prefix: string) => `${prefix}<absolute-path>`,
   );
   return sanitized;

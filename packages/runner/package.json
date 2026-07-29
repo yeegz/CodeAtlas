@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@codeatlas/analyzer": "workspace:*",
-    "execa": "9.6.0"
+    "execa": "9.6.0",
+    "typescript": "5.9.3"
   }
 }
