@@ -20,6 +20,8 @@ import type {
 
 const SOURCE_PATTERNS = ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx"];
 const OBSERVED_AT = "1970-01-01T00:00:00.000Z";
+const TEST_FRAMEWORK_MODULES = new Set(["vitest", "@jest/globals"]);
+const TEST_MODIFIERS = new Set(["only", "skip", "todo", "concurrent"]);
 
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -36,6 +38,14 @@ function stableId(
   qualifiedName: string,
 ): string {
   return sha256(`${snapshotSha}:${path}:${kind}:${qualifiedName}`);
+}
+
+function siteName(
+  sourceFile: ts.SourceFile,
+  node: ts.Node,
+  qualifiedName: string,
+): string {
+  return `${qualifiedName}@${node.getStart(sourceFile)}`;
 }
 
 function locationOf(
@@ -62,6 +72,15 @@ function hasExportModifier(node: ts.Node): boolean {
     : false;
 }
 
+function hasDefaultModifier(node: ts.Node): boolean {
+  return ts.canHaveModifiers(node)
+    ? ts
+        .getModifiers(node)
+        ?.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword) ===
+        true
+    : false;
+}
+
 function declarationName(node: ts.NamedDeclaration): string | null {
   if (!node.name) return null;
   if (
@@ -74,11 +93,13 @@ function declarationName(node: ts.NamedDeclaration): string | null {
   return node.name.getText();
 }
 
-function declarationSignature(
-  checker: ts.TypeChecker,
-  node: ts.Declaration,
-): string {
-  if (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) {
+function declarationSignature(checker: ts.TypeChecker, node: ts.Node): string {
+  if (
+    ts.isFunctionDeclaration(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isArrowFunction(node)
+  ) {
     const signature = checker.getSignatureFromDeclaration(node);
     if (signature)
       return checker.signatureToString(
@@ -117,12 +138,36 @@ function evidenceFor(
   };
 }
 
-function testName(node: ts.CallExpression): string | null {
-  if (
-    !ts.isIdentifier(node.expression) ||
-    !["it", "test"].includes(node.expression.text)
-  )
-    return null;
+function testName(
+  node: ts.CallExpression,
+  checker: ts.TypeChecker,
+  frameworkBindings: Set<ts.Symbol>,
+): string | null {
+  let root: ts.Identifier | undefined;
+  if (ts.isIdentifier(node.expression)) {
+    root = node.expression;
+  } else if (
+    ts.isPropertyAccessExpression(node.expression) &&
+    TEST_MODIFIERS.has(node.expression.name.text) &&
+    ts.isIdentifier(node.expression.expression)
+  ) {
+    root = node.expression.expression;
+  } else if (
+    ts.isCallExpression(node.expression) &&
+    ts.isPropertyAccessExpression(node.expression.expression) &&
+    node.expression.expression.name.text === "each" &&
+    ts.isIdentifier(node.expression.expression.expression)
+  ) {
+    root = node.expression.expression.expression;
+  }
+  if (!root) return null;
+
+  const symbol = checker.getSymbolAtLocation(root);
+  const isImportedBinding = symbol ? frameworkBindings.has(symbol) : false;
+  const isUnboundFrameworkGlobal =
+    !symbol && (root.text === "it" || root.text === "test");
+  if (!isImportedBinding && !isUnboundFrameworkGlobal) return null;
+
   const firstArgument = node.arguments[0];
   return firstArgument &&
     (ts.isStringLiteral(firstArgument) ||
@@ -180,7 +225,15 @@ export async function analyzeSnapshot(input: {
   const contracts: AnalyzedContract[] = [];
   const branches: AnalyzedBranch[] = [];
   const evidence: EvidenceItem[] = [];
-  const symbolByDeclaration = new Map<ts.Declaration, AnalyzedSymbol>();
+  const symbolByDeclaration = new Map<ts.Node, AnalyzedSymbol>();
+  const pendingExports: Array<{
+    sourceFile: ts.SourceFile;
+    path: string;
+    node: ts.Node;
+    exportName: string;
+    targetDeclaration?: ts.Node;
+    targetName: string;
+  }> = [];
 
   function addEvidence(
     path: string,
@@ -204,11 +257,13 @@ export async function analyzeSnapshot(input: {
   function addSymbol(
     sourceFile: ts.SourceFile,
     path: string,
-    node: ts.Declaration & ts.NamedDeclaration,
+    node: ts.Node & ts.NamedDeclaration,
     kind: string,
     qualifiedName: string,
+    nameOverride?: string,
   ): void {
-    const name = declarationName(node);
+    if (symbolByDeclaration.has(node)) return;
+    const name = nameOverride ?? declarationName(node);
     if (!name) return;
     const source = locationOf(sourceFile, node, input.snapshotSha, path);
     const signature = declarationSignature(checker, node);
@@ -234,7 +289,12 @@ export async function analyzeSnapshot(input: {
     symbols.push(symbol);
     symbolByDeclaration.set(node, symbol);
 
-    if (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) {
+    if (
+      ts.isFunctionDeclaration(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node)
+    ) {
       contracts.push({
         id: stableId(input.snapshotSha, path, "contract", qualifiedName),
         symbolId: symbol.id,
@@ -247,24 +307,116 @@ export async function analyzeSnapshot(input: {
     }
   }
 
+  function resolvedDeclaration(node: ts.Node): ts.Declaration | undefined {
+    const symbol = checker.getSymbolAtLocation(node);
+    if (!symbol) return undefined;
+    const resolved =
+      (symbol.flags & ts.SymbolFlags.Alias) !== 0
+        ? checker.getAliasedSymbol(symbol)
+        : symbol;
+    return resolved.declarations?.find((declaration) =>
+      pathByAbsolutePath.has(declaration.getSourceFile().fileName),
+    );
+  }
+
   for (const sourceFile of program.getSourceFiles()) {
     const path = pathByAbsolutePath.get(sourceFile.fileName);
     if (!path) continue;
-    const fileId = stableId(input.snapshotSha, path, "file", path);
+    const exportListedDeclarations = new Set<ts.Node>();
+
+    for (const statement of sourceFile.statements) {
+      if (ts.isExportDeclaration(statement)) {
+        const moduleName =
+          statement.moduleSpecifier &&
+          ts.isStringLiteral(statement.moduleSpecifier)
+            ? statement.moduleSpecifier.text
+            : undefined;
+        if (
+          statement.exportClause &&
+          ts.isNamedExports(statement.exportClause)
+        ) {
+          for (const element of statement.exportClause.elements) {
+            const localName = element.propertyName ?? element.name;
+            const targetDeclaration = resolvedDeclaration(localName);
+            if (!moduleName && targetDeclaration) {
+              exportListedDeclarations.add(targetDeclaration);
+            }
+            pendingExports.push({
+              sourceFile,
+              path,
+              node: element,
+              exportName: element.name.text,
+              ...(targetDeclaration ? { targetDeclaration } : {}),
+              targetName: `${moduleName ?? path}:${localName.text}`,
+            });
+          }
+        } else if (moduleName) {
+          pendingExports.push({
+            sourceFile,
+            path,
+            node: statement,
+            exportName: "*",
+            targetName: `${moduleName}:*`,
+          });
+        }
+      } else if (
+        ts.isExportAssignment(statement) &&
+        !statement.isExportEquals
+      ) {
+        const targetDeclaration = ts.isIdentifier(statement.expression)
+          ? resolvedDeclaration(statement.expression)
+          : ts.isFunctionExpression(statement.expression) ||
+              ts.isArrowFunction(statement.expression) ||
+              ts.isClassExpression(statement.expression)
+            ? statement.expression
+            : undefined;
+        if (targetDeclaration) exportListedDeclarations.add(targetDeclaration);
+        pendingExports.push({
+          sourceFile,
+          path,
+          node: statement,
+          exportName: "default",
+          ...(targetDeclaration ? { targetDeclaration } : {}),
+          targetName: targetDeclaration ? "default" : "default:expression",
+        });
+      }
+    }
 
     for (const statement of sourceFile.statements) {
       if (
         ts.isFunctionDeclaration(statement) &&
-        statement.name &&
-        hasExportModifier(statement)
+        (hasExportModifier(statement) ||
+          exportListedDeclarations.has(statement))
       ) {
-        addSymbol(sourceFile, path, statement, "function", statement.name.text);
+        const name = statement.name?.text ?? "default";
+        addSymbol(sourceFile, path, statement, "function", name, name);
+        if (hasExportModifier(statement)) {
+          pendingExports.push({
+            sourceFile,
+            path,
+            node: statement,
+            exportName: hasDefaultModifier(statement) ? "default" : name,
+            targetDeclaration: statement,
+            targetName: name,
+          });
+        }
       } else if (
         ts.isClassDeclaration(statement) &&
-        statement.name &&
-        hasExportModifier(statement)
+        (hasExportModifier(statement) ||
+          exportListedDeclarations.has(statement))
       ) {
-        addSymbol(sourceFile, path, statement, "class", statement.name.text);
+        const name = statement.name?.text ?? "default";
+        addSymbol(sourceFile, path, statement, "class", name, name);
+        if (hasExportModifier(statement)) {
+          pendingExports.push({
+            sourceFile,
+            path,
+            node: statement,
+            exportName: hasDefaultModifier(statement) ? "default" : name,
+            targetDeclaration: statement,
+            targetName: name,
+          });
+        }
         for (const member of statement.members) {
           if (ts.isMethodDeclaration(member) && member.name) {
             addSymbol(
@@ -272,13 +424,22 @@ export async function analyzeSnapshot(input: {
               path,
               member,
               "method",
-              `${statement.name.text}.${declarationName(member) ?? "method"}`,
+              `${name}.${declarationName(member) ?? "method"}`,
             );
+            pendingExports.push({
+              sourceFile,
+              path,
+              node: member,
+              exportName: declarationName(member) ?? "method",
+              targetDeclaration: member,
+              targetName: declarationName(member) ?? "method",
+            });
           }
         }
       } else if (
         ts.isInterfaceDeclaration(statement) &&
-        hasExportModifier(statement)
+        (hasExportModifier(statement) ||
+          exportListedDeclarations.has(statement))
       ) {
         addSymbol(
           sourceFile,
@@ -287,22 +448,67 @@ export async function analyzeSnapshot(input: {
           "interface",
           statement.name.text,
         );
+        if (hasExportModifier(statement)) {
+          pendingExports.push({
+            sourceFile,
+            path,
+            node: statement,
+            exportName: hasDefaultModifier(statement)
+              ? "default"
+              : statement.name.text,
+            targetDeclaration: statement,
+            targetName: statement.name.text,
+          });
+        }
+      } else if (
+        ts.isExportAssignment(statement) &&
+        !statement.isExportEquals &&
+        (ts.isFunctionExpression(statement.expression) ||
+          ts.isArrowFunction(statement.expression))
+      ) {
+        addSymbol(
+          sourceFile,
+          path,
+          statement.expression as ts.Node & ts.NamedDeclaration,
+          "function",
+          "default",
+          "default",
+        );
+      } else if (
+        ts.isExportAssignment(statement) &&
+        !statement.isExportEquals &&
+        ts.isClassExpression(statement.expression)
+      ) {
+        addSymbol(
+          sourceFile,
+          path,
+          statement.expression,
+          "class",
+          "default",
+          "default",
+        );
       }
 
       if (
         ts.isImportDeclaration(statement) &&
         ts.isStringLiteral(statement.moduleSpecifier)
       ) {
+        const fileId = stableId(input.snapshotSha, path, "file", path);
         const source = locationOf(
           sourceFile,
           statement,
           input.snapshotSha,
           path,
         );
+        const qualifiedName = siteName(
+          sourceFile,
+          statement,
+          statement.moduleSpecifier.text,
+        );
         const evidenceId = addEvidence(
           path,
           "import",
-          statement.moduleSpecifier.text,
+          qualifiedName,
           "STATIC_AST",
           source,
         );
@@ -313,12 +519,7 @@ export async function analyzeSnapshot(input: {
           statement.moduleSpecifier.text,
         );
         edges.push({
-          id: stableId(
-            input.snapshotSha,
-            path,
-            "edge:IMPORTS",
-            `${path}:${statement.moduleSpecifier.text}`,
-          ),
+          id: stableId(input.snapshotSha, path, "edge:IMPORTS", qualifiedName),
           from: fileId,
           to: target,
           fromName: path,
@@ -332,25 +533,53 @@ export async function analyzeSnapshot(input: {
     }
   }
 
-  for (const symbol of symbols) {
+  for (const pendingExport of pendingExports) {
+    const targetSymbol = pendingExport.targetDeclaration
+      ? symbolByDeclaration.get(pendingExport.targetDeclaration)
+      : undefined;
+    const source = locationOf(
+      pendingExport.sourceFile,
+      pendingExport.node,
+      input.snapshotSha,
+      pendingExport.path,
+    );
+    const qualifiedName = siteName(
+      pendingExport.sourceFile,
+      pendingExport.node,
+      `${pendingExport.exportName}:${pendingExport.targetName}`,
+    );
+    const evidenceId = addEvidence(
+      pendingExport.path,
+      "export",
+      qualifiedName,
+      "STATIC_AST",
+      source,
+    );
     edges.push({
       id: stableId(
         input.snapshotSha,
-        symbol.source.path,
+        pendingExport.path,
         "edge:EXPORTS",
-        symbol.qualifiedName,
+        qualifiedName,
       ),
       from: stableId(
         input.snapshotSha,
-        symbol.source.path,
+        pendingExport.path,
         "file",
-        symbol.source.path,
+        pendingExport.path,
       ),
-      to: symbol.id,
-      fromName: symbol.source.path,
-      toName: symbol.name,
+      to:
+        targetSymbol?.id ??
+        stableId(
+          input.snapshotSha,
+          pendingExport.path,
+          "module-export",
+          pendingExport.targetName,
+        ),
+      fromName: pendingExport.path,
+      toName: pendingExport.exportName,
       relation: "EXPORTS",
-      evidenceIds: [...symbol.evidenceIds],
+      evidenceIds: [evidenceId],
       evidenceType: "STATIC_AST",
       snapshotSha: input.snapshotSha,
     });
@@ -375,6 +604,24 @@ export async function analyzeSnapshot(input: {
     const path = pathByAbsolutePath.get(sourceFile.fileName);
     if (!path) continue;
     let currentSymbol: AnalyzedSymbol | undefined;
+    const frameworkBindings = new Set<ts.Symbol>();
+    for (const statement of sourceFile.statements) {
+      if (
+        !ts.isImportDeclaration(statement) ||
+        !ts.isStringLiteral(statement.moduleSpecifier) ||
+        !TEST_FRAMEWORK_MODULES.has(statement.moduleSpecifier.text) ||
+        !statement.importClause?.namedBindings ||
+        !ts.isNamedImports(statement.importClause.namedBindings)
+      ) {
+        continue;
+      }
+      for (const element of statement.importClause.namedBindings.elements) {
+        const importedName = element.propertyName?.text ?? element.name.text;
+        if (importedName !== "it" && importedName !== "test") continue;
+        const symbol = checker.getSymbolAtLocation(element.name);
+        if (symbol) frameworkBindings.add(symbol);
+      }
+    }
 
     const visit = (node: ts.Node): void => {
       const previousSymbol = currentSymbol;
@@ -384,7 +631,7 @@ export async function analyzeSnapshot(input: {
       const kind = branchKind(node);
       if (kind) {
         const source = locationOf(sourceFile, node, input.snapshotSha, path);
-        const qualifiedName = `${kind}:${source.startLine}:${source.endLine}`;
+        const qualifiedName = siteName(sourceFile, node, kind);
         const evidenceId = addEvidence(
           path,
           "branch",
@@ -402,7 +649,7 @@ export async function analyzeSnapshot(input: {
 
       if (/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(path)) {
         if (ts.isCallExpression(node)) {
-          const name = testName(node);
+          const name = testName(node, checker, frameworkBindings);
           if (name) {
             const source = locationOf(
               sourceFile,
@@ -410,7 +657,7 @@ export async function analyzeSnapshot(input: {
               input.snapshotSha,
               path,
             );
-            const qualifiedName = `${name}:${source.startLine}`;
+            const qualifiedName = siteName(sourceFile, node, name);
             const evidenceId = addEvidence(
               path,
               "test",
@@ -435,7 +682,11 @@ export async function analyzeSnapshot(input: {
         );
         if (target) {
           const source = locationOf(sourceFile, node, input.snapshotSha, path);
-          const qualifiedName = `${currentSymbol.qualifiedName}:${target.qualifiedName}:${source.startLine}`;
+          const qualifiedName = siteName(
+            sourceFile,
+            node,
+            `${currentSymbol.qualifiedName}:${target.qualifiedName}`,
+          );
           const evidenceId = addEvidence(
             path,
             "call",
