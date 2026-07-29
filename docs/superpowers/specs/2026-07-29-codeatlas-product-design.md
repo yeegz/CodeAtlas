@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-29
 
-**Status:** Approved concept; awaiting written-spec review
+**Status:** Approved for implementation
 
 **Product:** CodeAtlas
 
