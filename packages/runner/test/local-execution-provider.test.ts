@@ -246,6 +246,133 @@ describe("LocalExecutionProvider", () => {
     ]);
   }, 20_000);
 
+  it("retains every field in a failed structured observation", async () => {
+    const provider = new LocalExecutionProvider({ workspaceRoot });
+    const result = await provider.run({
+      ...request("base"),
+      testPaths: [],
+      generatedFiles: [
+        {
+          ...generatedFile("test/full-observation.generated.test.ts"),
+          content:
+            'import { expect, it } from "vitest";\nit("records the complete actual response", () => {\n  const response = { status: 500, body: { code: "INTERNAL_ERROR" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "SESSION_EXPIRED" });\n});\n',
+          objectiveId: "full-observation",
+          expectedBehavior: {
+            httpStatus: 401,
+            code: "SESSION_EXPIRED",
+          },
+        },
+      ],
+    });
+
+    expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+    expect(result.testCases).toMatchObject([
+      { status: "FAILED", generatedObjectiveId: "full-observation" },
+    ]);
+    expect(result.observations).toEqual([
+      {
+        testName: "records the complete actual response",
+        source: "TEST_ASSERTION",
+        expected: { httpStatus: 401, code: "SESSION_EXPIRED" },
+        actual: { httpStatus: 500, code: "INTERNAL_ERROR" },
+      },
+    ]);
+  }, 20_000);
+
+  it("accepts one direct generated test inside one direct describe wrapper", async () => {
+    const provider = new LocalExecutionProvider({ workspaceRoot });
+    const result = await provider.run({
+      ...request("head"),
+      testPaths: [],
+      generatedFiles: [
+        {
+          ...generatedFile("test/codeatlas.expired-session.test.ts"),
+          content: `import { describe, expect, it } from "vitest";
+import { restoreSession } from "../src/auth.js";
+
+describe("generated: expired session regression", () => {
+  it("returns SESSION_EXPIRED for a non-refreshable expired token", () => {
+    const response = restoreSession({ subject: null, expiresAt: 50, refreshable: false }, 100);
+    expect({
+      httpStatus: response.status,
+      code: "code" in response.body ? response.body.code : null,
+    }).toEqual({ httpStatus: 401, code: "SESSION_EXPIRED" });
+  });
+});
+`,
+          objectiveId: "expired-session-objective",
+          expectedBehavior: {
+            httpStatus: 401,
+            code: "SESSION_EXPIRED",
+          },
+        },
+      ],
+    });
+
+    expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+    expect(result.testCases).toMatchObject([
+      {
+        name:
+          "generated: expired session regression returns SESSION_EXPIRED for a non-refreshable expired token",
+        status: "FAILED",
+        generatedObjectiveId: "expired-session-objective",
+      },
+    ]);
+    expect(result.observations).toEqual([
+      {
+        testName:
+          "generated: expired session regression returns SESSION_EXPIRED for a non-refreshable expired token",
+        source: "TEST_ASSERTION",
+        expected: { httpStatus: 401, code: "SESSION_EXPIRED" },
+        actual: { httpStatus: 500, code: "INTERNAL_ERROR" },
+      },
+    ]);
+  }, 20_000);
+
+  it.each([
+    {
+      name: "an extra test",
+      body: `it("first", () => {
+    const response = { status: 500, body: { code: "INTERNAL_ERROR" } };
+    expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "SESSION_EXPIRED" });
+  });
+  it("second", () => {});`,
+    },
+    {
+      name: "a nested describe",
+      body: `describe("nested", () => {
+    it("nested test", () => {
+      const response = { status: 500, body: { code: "INTERNAL_ERROR" } };
+      expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "SESSION_EXPIRED" });
+    });
+  });`,
+    },
+  ])("does not trust a describe wrapper containing $name", async ({ body }) => {
+    const provider = new LocalExecutionProvider({ workspaceRoot });
+    const result = await provider.run({
+      ...request("base"),
+      testPaths: [],
+      generatedFiles: [
+        {
+          ...generatedFile("test/unsupported-describe.generated.test.ts"),
+          content: `import { describe, expect, it } from "vitest";
+describe("generated wrapper", () => {
+  ${body}
+});
+`,
+          objectiveId: "unsupported-describe",
+          expectedBehavior: {
+            httpStatus: 401,
+            code: "SESSION_EXPIRED",
+          },
+        },
+      ],
+    });
+
+    expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+    expect(result.observations).toEqual([]);
+  }, 20_000);
+
   it("fails closed when a generated assertion imports a non-Vitest expect", async () => {
     const fixtureRoot = await createSnapshot({
       "package.json": '{"private":true,"type":"module"}\n',
