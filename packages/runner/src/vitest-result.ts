@@ -449,6 +449,7 @@ function hasDirectVitestImports(
   let testImports = 0;
   for (const statement of source.statements) {
     if (!ts.isImportDeclaration(statement)) continue;
+    if (statement.importClause?.isTypeOnly === true) continue;
     const moduleName = ts.isStringLiteral(statement.moduleSpecifier)
       ? statement.moduleSpecifier.text
       : null;
@@ -459,6 +460,7 @@ function hasDirectVitestImports(
       continue;
     }
     for (const specifier of bindings.elements) {
+      if (specifier.isTypeOnly) continue;
       const localName = specifier.name.text;
       if (localName !== "expect" && localName !== testIdentifier) continue;
       const importedName = specifier.propertyName?.text ?? localName;

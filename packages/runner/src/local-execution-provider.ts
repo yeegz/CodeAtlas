@@ -891,7 +891,7 @@ function sanitizeOutput(
     (_whole, prefix: string, label: string) => `${prefix}${label}[REDACTED]`,
   );
   sanitized = sanitized.replace(
-    /(^|[\t ({["'=,:;])(?:[A-Za-z]:[\\/]|\/)[^\r\n]*/gmu,
+    /(^|[\t (){}\[\]"'=,:;])(?:[A-Za-z]:[\\/]|\/)[^\r\n]*/gmu,
     (_whole, prefix: string) => `${prefix}<absolute-path>`,
   );
   return sanitized;
