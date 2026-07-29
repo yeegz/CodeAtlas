@@ -22,13 +22,25 @@ import {
   LocalExecutionProvider,
   type LocalExecutionProviderOptions,
 } from "../src/local-execution-provider.js";
-import type { ExecutionRequest } from "../src/execution-provider.js";
+import type {
+  ExecutionRequest,
+  ExecutionResult,
+} from "../src/execution-provider.js";
 
 const workspaceRoot = resolve(import.meta.dirname, "../../..");
 const snapshotShas = {
   base: "abc58c76e50aaf580628c06e9b6e29e770f18a79",
   head: "7cbef5433a2498f2c57fa5cd35ee0382b39ccbd2",
 } as const;
+
+function executionResultDigest(
+  result: ExecutionResult & { resultDigest: string },
+): string {
+  const { resultDigest: _resultDigest, ...canonicalResult } = result;
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify(canonicalResult), "utf8")
+    .digest("hex")}`;
+}
 
 function request(revision: "base" | "head"): ExecutionRequest {
   return {
@@ -69,6 +81,12 @@ describe("LocalExecutionProvider", () => {
     expect(base.snapshotSha).toBe(snapshotShas.base);
     expect(head.snapshotSha).toBe(snapshotShas.head);
     expect(base.snapshotSha).not.toBe(head.snapshotSha);
+    expect(base.executionId).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(head.executionId).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(base.executionId).not.toBe(head.executionId);
+    expect(base.resultDigest).toBe(executionResultDigest(base));
+    expect(head.resultDigest).toBe(executionResultDigest(head));
+    expect(base.resultDigest).not.toBe(head.resultDigest);
     expect(base.environmentDigest).toMatch(/^[a-f0-9]{64}$/u);
     expect(head.environmentDigest).toBe(base.environmentDigest);
     expect(await workspaceDependencyState()).toEqual(dependenciesBefore);
@@ -300,6 +318,8 @@ describe("generated: expired session regression", () => {
       {
         testName:
           "generated: expired session regression returns SESSION_EXPIRED for a non-refreshable expired token",
+        path: "test/codeatlas.expired-session.test.ts",
+        generatedObjectiveId: "expired-session-objective",
         source: "TEST_ASSERTION",
         expected: { httpStatus: 401, code: "SESSION_EXPIRED" },
         actual: { httpStatus: 500, code: "INTERNAL_ERROR" },
@@ -599,6 +619,8 @@ describe("generated: expired session regression", () => {
         {
           testName:
             "generated: expired session regression returns SESSION_EXPIRED for a non-refreshable expired token",
+          path: "test/codeatlas.expired-session.test.ts",
+          generatedObjectiveId: "same-title-injection",
           source: "TEST_ASSERTION",
           expected: { httpStatus: 401, code: "SESSION_EXPIRED" },
           actual: { httpStatus: 401, code: "SESSION_EXPIRED" },

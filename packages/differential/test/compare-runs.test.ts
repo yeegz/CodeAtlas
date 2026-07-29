@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import type { ChangedSymbol } from "@codeatlas/analyzer";
@@ -66,14 +67,72 @@ describe("compareRuns", () => {
     expect(finding).toBeDefined();
     const sharedFinding: Finding = finding!;
 
-    expect(FindingSchema.parse(sharedFinding)).toEqual(
-      expect.objectContaining({
-        id: "finding_expired_session",
-        state: "CONFIRMED_REGRESSION",
-        proofCard: expect.objectContaining({
-          reproductionCommand: "codeatlas replay finding_expired_session",
+    const spread = { ...sharedFinding };
+    const cloned = structuredClone(sharedFinding);
+    const serialized = JSON.parse(JSON.stringify(sharedFinding));
+
+    for (const value of [spread, cloned, serialized]) {
+      expect(value).toEqual(
+        expect.objectContaining({
+          graphPath: "restoreSession → validateToken",
+          confidence: {
+            level: "HIGH",
+            factors: expect.arrayContaining(["REPEATABLE_3_OF_3"]),
+          },
         }),
-      }),
+      );
+      expect(FindingSchema.parse(value)).toEqual(value);
+    }
+  });
+
+  it.each([
+    {
+      name: "the same pair object",
+      mutate(input: MutableComparison) {
+        input.comparisons[1] = input.comparisons[0]!;
+      },
+      counts: { base: 2, head: 2 },
+    },
+    {
+      name: "a repeated execution id",
+      mutate(input: MutableComparison) {
+        input.comparisons[1]!.base.executionId =
+          input.comparisons[0]!.base.executionId;
+      },
+      counts: { base: 2, head: 3 },
+    },
+    {
+      name: "a repeated result digest",
+      mutate(input: MutableComparison) {
+        input.comparisons[1]!.head.resultDigest =
+          input.comparisons[0]!.head.resultDigest;
+      },
+      counts: { base: 3, head: 2 },
+    },
+  ])("rejects repeat inflation from $name", ({ mutate, counts }) => {
+    const input = structuredClone(comparison()) as MutableComparison;
+    mutate(input);
+
+    const [finding] = compareRuns(input);
+
+    expect(finding?.state).toBe("UNVERIFIED");
+    expect(finding?.proofCard.limitations).toContain(
+      "Each repeat must contain unique run-bound execution identities and result digests.",
+    );
+    expect(
+      finding?.evidence.find(({ id }) => id === "ev:differential")?.executions,
+    ).toEqual(counts);
+  });
+
+  it("rejects a result whose digest no longer binds its content", () => {
+    const input = structuredClone(comparison()) as MutableComparison;
+    input.comparisons[0]!.head.stderr = "mutated after execution";
+
+    const [finding] = compareRuns(input);
+
+    expect(finding?.state).toBe("UNVERIFIED");
+    expect(finding?.proofCard.limitations).toContain(
+      "An execution result digest does not match its run-bound result.",
     );
   });
 
@@ -175,6 +234,8 @@ describe("compareRuns", () => {
       pair.base.observations = [
         {
           testName: generatedName,
+          path: generatedPath,
+          generatedObjectiveId: objectiveId,
           source: "TEST_ASSERTION",
           expected: { httpStatus: 401, code: "SESSION_EXPIRED" },
           actual: { httpStatus: 403, code: "SESSION_REJECTED" },
@@ -196,7 +257,7 @@ describe("compareRuns", () => {
     );
   });
 
-  it("confirms an exact existing selected test from its structured expected behavior", () => {
+  it("leaves an existing selected test unverified without an upstream structured observation", () => {
     const input = structuredClone(comparison()) as MutableComparison;
     input.test = {
       provenance: "EXISTING",
@@ -214,11 +275,159 @@ describe("compareRuns", () => {
 
     const [finding] = compareRuns(input);
 
-    expect(finding?.state).toBe("CONFIRMED_REGRESSION");
-    expect(finding?.proofCard.baseBehavior).toBe(
-      "HTTP 401 with SESSION_EXPIRED",
+    expect(finding?.state).toBe("UNVERIFIED");
+    expect(finding?.proofCard.limitations).toContain(
+      "Existing selected tests do not provide a trusted structured behavioral observation.",
     );
   });
+
+  it.each([
+    {
+      name: "path",
+      mutate(observation: MutableObservation) {
+        observation.path = "test/unrelated.test.ts";
+      },
+    },
+    {
+      name: "objective",
+      mutate(observation: MutableObservation) {
+        observation.generatedObjectiveId = "objective:unrelated";
+      },
+    },
+  ])(
+    "does not match a same-named observation with another $name",
+    ({ mutate }) => {
+      const input = structuredClone(comparison()) as MutableComparison;
+      for (const pair of input.comparisons) {
+        mutate(pair.head.observations[0]!);
+      }
+
+      const [finding] = compareRuns(input);
+
+      expect(finding?.state).toBe("UNVERIFIED");
+      expect(finding?.proofCard.limitations).toContain(
+        "The head failure did not contain a validated structured behavioral observation.",
+      );
+    },
+  );
+
+  it("merges identical evidence ids without inflating finding evidence", () => {
+    const input = structuredClone(comparison()) as MutableComparison;
+    input.evidenceItems.push(structuredClone(input.evidenceItems[0]!));
+
+    const [finding] = compareRuns(input);
+
+    expect(finding?.state).toBe("CONFIRMED_REGRESSION");
+    expect(finding?.evidence.map(({ id }) => id)).toEqual([
+      "ev:branch",
+      "ev:call",
+      "ev:contract",
+      "ev:differential",
+    ]);
+    expect(FindingSchema.safeParse(finding).success).toBe(true);
+  });
+
+  it.each(["PARTIALLY_REPRODUCIBLE", "NOT_REPRODUCIBLE"] as const)(
+    "does not confirm %s differential evidence",
+    (reproducibility) => {
+      const input = structuredClone(comparison()) as MutableComparison;
+      input.evidenceItems.find(
+        ({ id }) => id === "ev:differential",
+      )!.reproducibility = reproducibility;
+
+      const [finding] = compareRuns(input);
+
+      expect(finding?.state).toBe("UNVERIFIED");
+      expect(finding?.proofCard.limitations).toContain(
+        "Differential execution evidence is not reproducible.",
+      );
+      expect(FindingSchema.safeParse(finding).success).toBe(true);
+    },
+  );
+
+  it("fails closed on conflicting duplicate evidence ids", () => {
+    const input = structuredClone(comparison()) as MutableComparison;
+    input.evidenceItems.push({
+      ...structuredClone(input.evidenceItems.at(-1)!),
+      reproducibility: "NOT_REPRODUCIBLE",
+    });
+
+    const [finding] = compareRuns(input);
+
+    expect(finding?.state).toBe("UNVERIFIED");
+    expect(finding?.proofCard.limitations).toContain(
+      "Conflicting evidence records share an identifier.",
+    );
+    expect(FindingSchema.safeParse(finding).success).toBe(true);
+  });
+
+  it("explains identical repeated base and head failures", () => {
+    const input = structuredClone(comparison()) as MutableComparison;
+    for (const pair of input.comparisons) {
+      pair.base.testCases[0]!.status = "FAILED";
+      pair.base.exitCode = 1;
+      pair.base.observations = structuredClone(pair.head.observations);
+    }
+
+    const [finding] = compareRuns(input);
+
+    expect(finding?.state).toBe("UNVERIFIED");
+    expect(finding?.proofCard.limitations).toContain(
+      "Base and head failed with the same observed behavior, so no differential change was established.",
+    );
+  });
+
+  it.each([
+    {
+      name: "a non-array comparison collection",
+      mutate(input: Record<string, unknown>) {
+        input.comparisons = null;
+      },
+    },
+    {
+      name: "a malformed execution pair",
+      mutate(input: Record<string, unknown>) {
+        input.comparisons = [{ base: null, head: 42 }];
+      },
+    },
+    {
+      name: "a malformed graph path",
+      mutate(input: Record<string, unknown>) {
+        input.graphPath = [null];
+      },
+    },
+    {
+      name: "a malformed evidence member",
+      mutate(input: Record<string, unknown>) {
+        input.evidenceItems = [null, ...(input.evidenceItems as unknown[])];
+      },
+    },
+  ])("returns a frozen unverified finding for $name", ({ mutate }) => {
+    const input = structuredClone(comparison()) as unknown as Record<
+      string,
+      unknown
+    >;
+    mutate(input);
+
+    expect(() =>
+      compareRuns(input as unknown as ComparisonInput),
+    ).not.toThrow();
+    const findings = compareRuns(input as unknown as ComparisonInput);
+
+    expect(findings[0]?.state).toBe("UNVERIFIED");
+    expect(findings[0]?.proofCard.limitations.length).toBeGreaterThan(0);
+    expect(Object.isFrozen(findings)).toBe(true);
+    expect(Object.isFrozen(findings[0])).toBe(true);
+  });
+
+  it.each([null, {}, { findingId: "" }, { findingId: 42 }])(
+    "returns a frozen empty result when no finding identity exists for %j",
+    (input) => {
+      const findings = compareRuns(input as unknown as ComparisonInput);
+      expect(findings).toEqual([]);
+      expect(Object.isFrozen(findings)).toBe(true);
+    },
+  );
 
   it("is deterministic and does not mutate frozen upstream records", () => {
     const input = comparison();
@@ -288,9 +497,9 @@ function comparison(): ComparisonInput {
 
   return {
     findingId: "finding_expired_session",
-    comparisons: [0, 1, 2].map(() => ({
-      base: execution("base", "PASSED"),
-      head: execution("head", "FAILED"),
+    comparisons: [0, 1, 2].map((repeat) => ({
+      base: execution("base", "PASSED", repeat),
+      head: execution("head", "FAILED", repeat),
     })),
     test: { provenance: "GENERATED", generatedTest, objective },
     changedSymbols,
@@ -302,8 +511,10 @@ function comparison(): ComparisonInput {
 function execution(
   revision: "base" | "head",
   status: "PASSED" | "FAILED",
+  repeat: number,
 ): ExecutionResult {
-  return {
+  const result = {
+    executionId: `execution:${revision}:${repeat}`,
     revision,
     snapshotSha: revision === "base" ? baseSha : headSha,
     terminalState: "COMPLETED",
@@ -324,6 +535,8 @@ function execution(
         ? [
             {
               testName: generatedName,
+              path: generatedPath,
+              generatedObjectiveId: objectiveId,
               source: "TEST_ASSERTION",
               expected: { httpStatus: 401, code: "SESSION_EXPIRED" },
               actual: { httpStatus: 500, code: "INTERNAL_ERROR" },
@@ -334,6 +547,16 @@ function execution(
     stderr: "",
     environmentDigest: "environment-digest",
   };
+  return {
+    ...result,
+    resultDigest: digestResult(result),
+  };
+}
+
+function digestResult(result: object): string {
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify(result), "utf8")
+    .digest("hex")}`;
 }
 
 function evidence(
@@ -376,3 +599,10 @@ type MutableComparison = {
 type Mutable<Value> = Value extends object
   ? { -readonly [Key in keyof Value]: Mutable<Value[Key]> }
   : Value;
+
+type MutableObservation = Mutable<
+  ExecutionResult["observations"][number] & {
+    path: string;
+    generatedObjectiveId: string | null;
+  }
+>;
