@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import type { ChangedSymbol } from "@codeatlas/analyzer";
-import type { EvidenceItem } from "@codeatlas/evidence";
+import {
+  FindingSchema,
+  type EvidenceItem,
+  type Finding,
+} from "@codeatlas/evidence";
 import type { GeneratedTest, TestObjective } from "@codeatlas/generator";
 import type { ExecutionResult } from "@codeatlas/runner";
 import type { SelectionEdge } from "@codeatlas/selector";
@@ -59,6 +63,22 @@ describe("compareRuns", () => {
         },
       }),
     ]);
+  });
+
+  it("remains assignable to and runtime-valid as the shared evidence finding", () => {
+    const finding = compareRuns(comparison())[0];
+    expect(finding).toBeDefined();
+    const sharedFinding: Finding = finding!;
+
+    expect(FindingSchema.parse(sharedFinding)).toEqual(
+      expect.objectContaining({
+        id: "finding_expired_session",
+        state: "CONFIRMED_REGRESSION",
+        proofCard: expect.objectContaining({
+          reproductionCommand: "codeatlas replay finding_expired_session",
+        }),
+      }),
+    );
   });
 
   it.each([
