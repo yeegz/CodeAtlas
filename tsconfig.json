@@ -1,5 +1,8 @@
 {
   "extends": "./tsconfig.base.json",
   "files": [],
-  "references": [{ "path": "./packages/evidence" }]
+  "references": [
+    { "path": "./packages/evidence" },
+    { "path": "./packages/analyzer" }
+  ]
 }
