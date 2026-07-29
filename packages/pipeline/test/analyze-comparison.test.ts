@@ -1,5 +1,13 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { lstat, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdtemp,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -7,7 +15,7 @@ import {
   analyzeSnapshot,
   computeSnapshotDigest,
 } from "../../analyzer/src/index.js";
-import { verifyManifest } from "../../evidence/src/index.js";
+import { deriveAnalysisId, verifyManifest } from "../../evidence/src/index.js";
 import {
   TemplateTestGenerator,
   type TestGenerationResult,
@@ -31,12 +39,20 @@ import {
   type AnalyzeComparisonRequest,
   type ArtifactStore,
 } from "../src/index.js";
+import * as PipelineModule from "../src/index.js";
 
 const workspaceRoot = resolve(import.meta.dirname, "../../..");
 const baseRoot = resolve(workspaceRoot, "fixtures/auth-regression/base");
 const headRoot = resolve(workspaceRoot, "fixtures/auth-regression/head");
 const configurationDigest = `sha256:${"c".repeat(64)}`;
 const fixedTime = new Date("2026-07-29T00:00:00.000Z");
+const fixtureAnalysisId = deriveAnalysisId({
+  provider: "local",
+  baseSha: "abc58c76e50aaf580628c06e9b6e29e770f18a79",
+  headSha: "7cbef5433a2498f2c57fa5cd35ee0382b39ccbd2",
+  configurationDigest,
+  engineVersion: "0.1.0",
+});
 
 it("derives a deterministic, snapshot-bound test edge only from analyzed imports and test sites", async () => {
   const snapshotSha = await computeSnapshotDigest(headRoot);
@@ -122,8 +138,11 @@ it("runs the complete authentication proof workflow from canonical upstream reco
       "test/auth.test.ts",
       "test/codeatlas.expired-session.test.ts",
     ],
-    replay: "codeatlas replay finding_expired_session",
+    replay: ["codeatlas", "replay", "finding_expired_session"],
   });
+  expect(output.findings[0]?.proofCard.reproductionCommand).toBe(
+    "codeatlas replay finding_expired_session",
+  );
 });
 
 it("keeps canonical signed output stable while attempt ids remain unique outside it", async () => {
@@ -143,8 +162,195 @@ it("keeps canonical signed output stable while attempt ids remain unique outside
   expect(JSON.stringify(second.signedManifest)).not.toContain(second.attemptId);
 });
 
+it("seeds selected-test coverage on base before any generated execution", async () => {
+  const executionProvider = new FixtureExecutionProvider();
+
+  const output = await analyzeComparison(fixtureRequest({ executionProvider }));
+
+  expect(executionProvider.requests[0]).toEqual(
+    expect.objectContaining({
+      revision: "base",
+      snapshotRoot: baseRoot,
+      generatedFiles: [],
+    }),
+  );
+  expect(output.runs[0]?.revision).toBe("base");
+  expect(output.generatedTests).toHaveLength(1);
+});
+
+it("keeps a changed one-line condition uncovered when line coverage only visits its line", () => {
+  expect("deriveObjectiveCoverage" in PipelineModule).toBe(true);
+  const deriveObjectiveCoverage = (
+    PipelineModule as unknown as {
+      deriveObjectiveCoverage(
+        coverage: ExecutionResult["coverage"],
+        analysis: {
+          snapshotSha: string;
+          branches: Array<{
+            id: string;
+            kind: "if";
+            source: {
+              snapshotSha: string;
+              path: string;
+              startLine: number;
+              endLine: number;
+            };
+            evidenceIds: string[];
+          }>;
+        },
+        changedSymbols: Array<{
+          id: string;
+          name: string;
+          path: string;
+          baseLocation: null;
+          headLocation: {
+            snapshotSha: string;
+            path: string;
+            startLine: number;
+            endLine: number;
+          };
+          changedLines: number[];
+          signatureChanged: boolean;
+        }>,
+      ): ExecutionResult["coverage"];
+    }
+  ).deriveObjectiveCoverage;
+  const snapshotSha = "a".repeat(40);
+
+  expect(
+    deriveObjectiveCoverage(
+      [{ path: "src/auth.ts", coveredLines: [15, 22] }],
+      {
+        snapshotSha,
+        branches: [
+          {
+            id: "branch:condition",
+            kind: "if",
+            source: {
+              snapshotSha,
+              path: "src/auth.ts",
+              startLine: 15,
+              endLine: 15,
+            },
+            evidenceIds: ["ev:condition"],
+          },
+        ],
+      },
+      [
+        {
+          id: "symbol:validateToken",
+          name: "validateToken",
+          path: "src/auth.ts",
+          baseLocation: null,
+          headLocation: {
+            snapshotSha,
+            path: "src/auth.ts",
+            startLine: 15,
+            endLine: 15,
+          },
+          changedLines: [15],
+          signatureChanged: false,
+        },
+      ],
+    ),
+  ).toEqual([{ path: "src/auth.ts", coveredLines: [22] }]);
+});
+
+it.each([
+  {
+    name: "changed canonical content",
+    mutate(test: Record<string, unknown>) {
+      test.content = `${String(test.content)}\n// untrusted`;
+    },
+  },
+  {
+    name: "alternate path",
+    mutate(test: Record<string, unknown>) {
+      test.path = "test/alternate.test.ts";
+    },
+  },
+  {
+    name: "reordered evidence ids",
+    mutate(test: Record<string, unknown>) {
+      test.evidenceIds = [...(test.evidenceIds as string[])].reverse();
+    },
+  },
+  {
+    name: "changed expected behavior",
+    mutate(test: Record<string, unknown>) {
+      test.expectedBehavior = { httpStatus: 200, code: "OK" };
+    },
+  },
+  {
+    name: "extra field",
+    mutate(test: Record<string, unknown>) {
+      test.selfCertified = true;
+    },
+  },
+] as const)(
+  "rejects generated output with $name before execution",
+  async ({ mutate }) => {
+    const executionProvider = new FixtureExecutionProvider();
+    const template = new TemplateTestGenerator();
+    const testGenerator: TestGenerator = {
+      async generate(objective) {
+        const result = await template.generate(objective);
+        if (result.state !== "GENERATED") return result;
+        const test = structuredClone(result.test) as unknown as Record<
+          string,
+          unknown
+        >;
+        mutate(test);
+        return { state: "GENERATED", test: test as never };
+      },
+    };
+
+    await expect(
+      analyzeComparison(fixtureRequest({ executionProvider, testGenerator })),
+    ).rejects.toThrow(/generated test|generated output|candidate/i);
+    expect(executionProvider.requests).toHaveLength(1);
+  },
+);
+
+it.each([
+  {
+    name: "another analysis scope",
+    createStore: () =>
+      new MemoryArtifactStore(`analysis_${"f".repeat(64)}`, false),
+  },
+  {
+    name: "another artifact kind",
+    createStore: () =>
+      new MemoryArtifactStore(fixtureAnalysisId, false, "wrong-kind"),
+  },
+])("rejects an artifact path in $name", async ({ createStore }) => {
+  await expect(
+    analyzeComparison(fixtureRequest({ artifactStore: createStore() })),
+  ).rejects.toThrow(/artifact.*path|scope|kind/i);
+});
+
+it("canonicalizes equivalent reordered provider arrays before manifest signing", async () => {
+  const keys = generateKeyPairSync("ed25519");
+  const normal = await analyzeComparison(
+    fixtureRequest({ signingKey: keys.privateKey }),
+  );
+  const reordered = await analyzeComparison(
+    fixtureRequest({
+      signingKey: keys.privateKey,
+      executionProvider: new ReorderedExecutionProvider(),
+    }),
+  );
+  const differentialDigest = (output: typeof normal) =>
+    output.reproductionBundle.artifacts.find(
+      ({ kind }) => kind === "differential-evidence",
+    )?.digest;
+
+  expect(differentialDigest(reordered)).toBe(differentialDigest(normal));
+  expect(reordered.signedManifest.digest).toBe(normal.signedManifest.digest);
+});
+
 it("fails closed on a corrupt artifact round trip", async () => {
-  const artifactStore = new MemoryArtifactStore(true);
+  const artifactStore = new MemoryArtifactStore(fixtureAnalysisId, true);
   await expect(
     analyzeComparison(fixtureRequest({ artifactStore })),
   ).rejects.toThrow(/artifact.*(?:digest|mismatch|schema)/i);
@@ -178,7 +384,7 @@ it("fails closed when deterministic generation does not support an objective", a
 
 it("fails closed on signing failure and never sends private key material to storage", async () => {
   const keys = generateKeyPairSync("ed25519");
-  const artifactStore = new MemoryArtifactStore();
+  const artifactStore = new MemoryArtifactStore(fixtureAnalysisId);
 
   await expect(
     analyzeComparison(
@@ -204,7 +410,7 @@ describe("LocalArtifactStore", () => {
       expect(second).toEqual(first);
       expect(first.path).toMatch(
         new RegExp(
-          `^\\.codeatlas/runs/${analysisId}/manifest-[0-9a-f]{64}\\.json$`,
+          `^\\.codeatlas/runs/${analysisId}/manifest-sha256-[0-9a-f]{64}\\.json$`,
         ),
       );
       expect(first.digest).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -233,7 +439,7 @@ describe("LocalArtifactStore", () => {
     },
   );
 
-  it("rejects traversal, symlink following, digest tampering, and oversized reads", async () => {
+  it("rejects traversal, symlink following, and digest tampering", async () => {
     const repositoryRoot = await mkdtemp(join(tmpdir(), "codeatlas-store-"));
     try {
       const analysisId = `analysis_${"c".repeat(64)}`;
@@ -254,21 +460,110 @@ describe("LocalArtifactStore", () => {
       );
       await expect(store.readJson(artifact.path)).rejects.toThrow(/digest/i);
 
-      const large = await store.putJson("large", { value: "x".repeat(256) });
-      await expect(store.readJson(large.path)).rejects.toThrow(/size|large/i);
-
       const outside = join(repositoryRoot, "outside.json");
       await writeFile(outside, "{}", { mode: 0o600 });
       const linkedPath = resolve(
         repositoryRoot,
-        `.codeatlas/runs/${analysisId}/linked-${"0".repeat(64)}.json`,
+        `.codeatlas/runs/${analysisId}/linked-sha256-${"0".repeat(64)}.json`,
       );
       await symlink(outside, linkedPath);
       await expect(
         store.readJson(
-          `.codeatlas/runs/${analysisId}/linked-${"0".repeat(64)}.json`,
+          `.codeatlas/runs/${analysisId}/linked-sha256-${"0".repeat(64)}.json`,
         ),
       ).rejects.toThrow(/symlink|regular/i);
+    } finally {
+      await rm(repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects oversized artifacts before creating persistent storage", async () => {
+    const repositoryRoot = await mkdtemp(join(tmpdir(), "codeatlas-store-"));
+    try {
+      const store = new LocalArtifactStore({
+        repositoryRoot,
+        analysisId: `analysis_${"d".repeat(64)}`,
+        maxReadBytes: 64,
+      });
+
+      await expect(
+        store.putJson("large", { value: "x".repeat(256) }),
+      ).rejects.toThrow(/size|large/i);
+      expect(await readdir(repositoryRoot)).toEqual([]);
+    } finally {
+      await rm(repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an existing artifact whose mode is not private", async () => {
+    const repositoryRoot = await mkdtemp(join(tmpdir(), "codeatlas-store-"));
+    try {
+      const store = new LocalArtifactStore({
+        repositoryRoot,
+        analysisId: `analysis_${"e".repeat(64)}`,
+      });
+      const artifact = await store.putJson("record", { safe: true });
+      await chmod(resolve(repositoryRoot, artifact.path), 0o644);
+
+      await expect(store.putJson("record", { safe: true })).rejects.toThrow(
+        /mode|permission/i,
+      );
+      await expect(store.readJson(artifact.path)).rejects.toThrow(
+        /mode|permission/i,
+      );
+    } finally {
+      await rm(repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a mismatched pre-existing destination and cleans temporary files", async () => {
+    const repositoryRoot = await mkdtemp(join(tmpdir(), "codeatlas-store-"));
+    try {
+      const analysisId = `analysis_${"f".repeat(64)}`;
+      const store = new LocalArtifactStore({ repositoryRoot, analysisId });
+      await store.putJson("seed", {});
+      const canonical = '{"safe":true}';
+      const digest = createHash("sha256").update(canonical).digest("hex");
+      const artifactDirectory = resolve(
+        repositoryRoot,
+        `.codeatlas/runs/${analysisId}`,
+      );
+      const destination = resolve(
+        artifactDirectory,
+        `record-sha256-${digest}.json`,
+      );
+      await writeFile(destination, '{"safe":false}', { mode: 0o600 });
+
+      await expect(store.putJson("record", { safe: true })).rejects.toThrow(
+        /digest|content|existing/i,
+      );
+      expect(await readdir(artifactDirectory)).not.toEqual(
+        expect.arrayContaining([expect.stringMatching(/temporary/i)]),
+      );
+    } finally {
+      await rm(repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reuses a matching artifact without overwriting it", async () => {
+    const repositoryRoot = await mkdtemp(join(tmpdir(), "codeatlas-store-"));
+    try {
+      const store = new LocalArtifactStore({
+        repositoryRoot,
+        analysisId: `analysis_${"1".repeat(64)}`,
+      });
+      const first = await store.putJson("record", { safe: true });
+      const before = await lstat(resolve(repositoryRoot, first.path), {
+        bigint: true,
+      });
+      const second = await store.putJson("record", { safe: true });
+      const after = await lstat(resolve(repositoryRoot, second.path), {
+        bigint: true,
+      });
+
+      expect(second).toEqual(first);
+      expect(after.ino).toBe(before.ino);
+      expect(after.mtimeNs).toBe(before.mtimeNs);
     } finally {
       await rm(repositoryRoot, { recursive: true, force: true });
     }
@@ -332,7 +627,7 @@ function fixtureRequest(
     engineVersion: "0.1.0",
     configurationDigest,
     executionProvider: new FixtureExecutionProvider(),
-    artifactStore: new MemoryArtifactStore(),
+    artifactStore: new MemoryArtifactStore(fixtureAnalysisId),
     testGenerator: new TemplateTestGenerator(),
     clock: { now: () => fixedTime },
     signingKey: privateKey,
@@ -342,10 +637,12 @@ function fixtureRequest(
 
 class FixtureExecutionProvider implements ExecutionProvider {
   #sequence = 0;
+  readonly requests: ExecutionRequest[] = [];
 
   constructor(private readonly mode: "complete" | "timeout" = "complete") {}
 
   async run(request: ExecutionRequest): Promise<ExecutionResult> {
+    this.requests.push(structuredClone(request));
     this.#sequence += 1;
     const generated = request.generatedFiles[0];
     const timedOut =
@@ -387,7 +684,10 @@ class FixtureExecutionProvider implements ExecutionProvider {
             ]
           : []),
       ],
-      coverage: [{ path: "src/auth.ts", coveredLines: [22, 23, 24, 25, 26] }],
+      coverage: [
+        { path: "src/auth.ts", coveredLines: [22, 23, 24, 25, 26] },
+        { path: "src/secondary.ts", coveredLines: [9, 3] },
+      ],
       observations:
         generated && request.revision === "head" && !timedOut
           ? [
@@ -413,12 +713,16 @@ class FixtureExecutionProvider implements ExecutionProvider {
 class MemoryArtifactStore implements ArtifactStore {
   readonly values = new Map<string, unknown>();
 
-  constructor(private readonly corruptReads = false) {}
+  constructor(
+    private readonly analysisId: string,
+    private readonly corruptReads = false,
+    private readonly returnedKind?: string,
+  ) {}
 
   async putJson(kind: string, value: unknown) {
     const canonical = canonicalizeForTest(value);
     const digest = `sha256:${createHash("sha256").update(canonical).digest("hex")}`;
-    const path = `.codeatlas/runs/memory/${kind}-${digest.slice(7)}.json`;
+    const path = `.codeatlas/runs/${this.analysisId}/${this.returnedKind ?? kind}-sha256-${digest.slice(7)}.json`;
     this.values.set(path, JSON.parse(canonical));
     return { digest, path };
   }
@@ -428,6 +732,26 @@ class MemoryArtifactStore implements ArtifactStore {
     if (value === undefined) throw new Error("missing artifact");
     const copy = structuredClone(value) as T;
     return this.corruptReads ? ({ corrupt: copy } as T) : copy;
+  }
+}
+
+class ReorderedExecutionProvider implements ExecutionProvider {
+  readonly #delegate = new FixtureExecutionProvider();
+
+  async run(request: ExecutionRequest): Promise<ExecutionResult> {
+    const original = await this.#delegate.run(request);
+    const result = {
+      ...original,
+      testCases: [...original.testCases].reverse(),
+      coverage: [...original.coverage].reverse().map((item) => ({
+        ...item,
+        coveredLines: [...item.coveredLines].reverse(),
+      })),
+      observations: [...original.observations].reverse(),
+    };
+    const { resultDigest: _digest, ...bound } = result;
+    void _digest;
+    return { ...bound, resultDigest: computeExecutionResultDigest(bound) };
   }
 }
 

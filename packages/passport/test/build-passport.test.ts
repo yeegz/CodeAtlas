@@ -17,6 +17,7 @@ import {
   passportToMarkdown,
   type BuildPassportInput,
 } from "../src/index.js";
+import * as PassportModule from "../src/index.js";
 
 const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
@@ -49,7 +50,9 @@ it("derives the fixture state and every summary count from validated evidence", 
       acceptedChanges: 0,
       confirmedChanges: 0,
       confirmedRegressions: 1,
+      possibleImpacts: 0,
       probableImpacts: 0,
+      resolved: 0,
       unverified: 0,
     },
     runs: { base: 3, completed: 6, head: 3, total: 6 },
@@ -136,6 +139,174 @@ it("does not accept caller-provided totals or state overrides", () => {
   expect(() => buildPassport(invalid as unknown as BuildPassportInput)).toThrow(
     /caller-provided|unknown/i,
   );
+});
+
+it.each([
+  ["PROBABLE_IMPACT", "probableImpacts"],
+  ["POSSIBLE_IMPACT", "possibleImpacts"],
+] as const)(
+  "requires action for a %s finding and counts it explicitly",
+  (state, countName) => {
+    const input = passportInput();
+    input.findings = [{ ...confirmedFinding(), state }];
+
+    const passport = buildPassport(input);
+
+    expect(passport.overallState).toBe("ACTION_REQUIRED");
+    expect(passport.summary.findings[countName]).toBe(1);
+  },
+);
+
+it("marks incomplete evidence as INCOMPLETE instead of verified", () => {
+  const input = passportInput();
+  input.findings = [unverifiedFinding("finding_unverified")];
+
+  const passport = buildPassport(input);
+
+  expect(passport.overallState).toBe("INCOMPLETE");
+  expect(passport.summary.findings.unverified).toBe(1);
+});
+
+it("counts every shared FindingState in the derived summary", () => {
+  const input = passportInput();
+  input.findings = [
+    { ...confirmedFinding(), id: "confirmed-regression" },
+    {
+      ...confirmedFinding(),
+      id: "confirmed-change",
+      state: "CONFIRMED_CHANGE",
+    },
+    {
+      ...confirmedFinding(),
+      id: "probable-impact",
+      state: "PROBABLE_IMPACT",
+    },
+    {
+      ...confirmedFinding(),
+      id: "possible-impact",
+      state: "POSSIBLE_IMPACT",
+    },
+    unverifiedFinding("unverified"),
+    { ...confirmedFinding(), id: "resolved", state: "RESOLVED" },
+    {
+      ...confirmedFinding(),
+      id: "accepted",
+      state: "ACCEPTED_CHANGE",
+    },
+  ];
+
+  expect(buildPassport(input).summary.findings).toEqual({
+    acceptedChanges: 1,
+    confirmedChanges: 1,
+    confirmedRegressions: 1,
+    possibleImpacts: 1,
+    probableImpacts: 1,
+    resolved: 1,
+    unverified: 1,
+  });
+});
+
+it.each([
+  {
+    name: "overall state",
+    mutate(value: Record<string, unknown>) {
+      value.overallState = "VERIFIED";
+    },
+  },
+  {
+    name: "summary count",
+    mutate(value: Record<string, unknown>) {
+      const summary = value.summary as {
+        findings: { confirmedRegressions: number };
+      };
+      summary.findings.confirmedRegressions = 0;
+    },
+  },
+  {
+    name: "file inventory",
+    mutate(value: Record<string, unknown>) {
+      value.changedFiles = ["src/invented.ts"];
+    },
+  },
+  {
+    name: "evidence inventory",
+    mutate(value: Record<string, unknown>) {
+      value.evidenceIds = ["ev:invented"];
+    },
+  },
+  {
+    name: "replay inventory",
+    mutate(value: Record<string, unknown>) {
+      value.replayCommands = ["codeatlas replay invented"];
+    },
+  },
+  {
+    name: "unknown field",
+    mutate(value: Record<string, unknown>) {
+      value.callerSummary = { safe: true };
+    },
+  },
+])("exporters reject a caller-fabricated $name", ({ mutate }) => {
+  const fabricated = structuredClone(
+    buildPassport(passportInput()),
+  ) as unknown as Record<string, unknown>;
+  mutate(fabricated);
+
+  expect(() => passportToJson(fabricated as never)).toThrow();
+  expect(() => passportToMarkdown(fabricated as never)).toThrow();
+});
+
+it.each([
+  {
+    name: "traversal path",
+    mutate(symbol: Record<string, unknown>) {
+      symbol.path = "../escape.ts";
+    },
+  },
+  {
+    name: "mismatched base source path",
+    mutate(symbol: Record<string, unknown>) {
+      (symbol.baseLocation as Record<string, unknown>).path = "src/other.ts";
+    },
+  },
+  {
+    name: "malformed source SHA",
+    mutate(symbol: Record<string, unknown>) {
+      (symbol.headLocation as Record<string, unknown>).snapshotSha = "head";
+    },
+  },
+  {
+    name: "non-boolean signature flag",
+    mutate(symbol: Record<string, unknown>) {
+      symbol.signatureChanged = "false";
+    },
+  },
+])("rejects a ChangedSymbol with a $name", ({ mutate }) => {
+  const input = passportInput();
+  const symbol = structuredClone(input.changedSymbols[0]!) as unknown as Record<
+    string,
+    unknown
+  >;
+  mutate(symbol);
+  input.changedSymbols = [symbol as unknown as ChangedSymbol];
+
+  expect(() => buildPassport(input)).toThrow(/changed symbol|source|path/i);
+});
+
+it("exports a strict complete BuiltChangePassport runtime schema", () => {
+  expect("BuiltChangePassportSchema" in PassportModule).toBe(true);
+  const schema = (
+    PassportModule as unknown as {
+      BuiltChangePassportSchema: {
+        safeParse(value: unknown): { success: boolean };
+      };
+    }
+  ).BuiltChangePassportSchema;
+  expect(schema.safeParse(buildPassport(passportInput())).success).toBe(true);
+  expect(
+    schema.safeParse({ ...buildPassport(passportInput()), unknown: true })
+      .success,
+  ).toBe(false);
 });
 
 function passportInput(): BuildPassportInput & {

@@ -8,6 +8,7 @@ import {
   type DeriveTestObjectivesInput,
   type TestObjective,
 } from "../src/index.js";
+import * as GeneratorModule from "../src/index.js";
 
 const workspaceRoot = resolve(import.meta.dirname, "../../..");
 const snapshotSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -155,6 +156,77 @@ describe("TemplateTestGenerator", () => {
       reason:
         "No deterministic template supports unrelatedSymbol through otherEntry at src/other.ts:3.",
     });
+  });
+
+  it.each([
+    {
+      name: "alternate safe path",
+      mutate(test: Record<string, unknown>) {
+        test.path = "test/alternate.test.ts";
+      },
+    },
+    {
+      name: "changed source",
+      mutate(test: Record<string, unknown>) {
+        test.content = `${String(test.content)}\n// changed`;
+      },
+    },
+    {
+      name: "reordered evidence",
+      mutate(test: Record<string, unknown>) {
+        test.evidenceIds = [...(test.evidenceIds as string[])].reverse();
+      },
+    },
+    {
+      name: "changed expected behavior",
+      mutate(test: Record<string, unknown>) {
+        test.expectedBehavior = { httpStatus: 200, code: "OK" };
+      },
+    },
+    {
+      name: "wrong generated flag",
+      mutate(test: Record<string, unknown>) {
+        test.generated = false;
+      },
+    },
+    {
+      name: "wrong executed flag",
+      mutate(test: Record<string, unknown>) {
+        test.executed = true;
+      },
+    },
+    {
+      name: "wrong objective id",
+      mutate(test: Record<string, unknown>) {
+        test.objectiveId = "objective:other";
+      },
+    },
+    {
+      name: "extra runtime field",
+      mutate(test: Record<string, unknown>) {
+        test.certified = true;
+      },
+    },
+  ])("rejects generated output with $name", async ({ mutate }) => {
+    const objective = deriveTestObjectives(objectiveInput)[0]!;
+    const result = await new TemplateTestGenerator().generate(objective);
+    if (result.state !== "GENERATED") throw new Error(result.reason);
+    const candidate = structuredClone(result.test) as unknown as Record<
+      string,
+      unknown
+    >;
+    mutate(candidate);
+
+    expect("validateGeneratedTest" in GeneratorModule).toBe(true);
+    const validateGeneratedTest = (
+      GeneratorModule as unknown as {
+        validateGeneratedTest(
+          objective: TestObjective,
+          value: unknown,
+        ): unknown;
+      }
+    ).validateGeneratedTest;
+    expect(() => validateGeneratedTest(objective, candidate)).toThrow();
   });
 
   it("executes the generated test as a base pass and head regression observation", async () => {
