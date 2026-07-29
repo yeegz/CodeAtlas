@@ -7,6 +7,8 @@
     { "path": "./packages/selector" },
     { "path": "./packages/runner" },
     { "path": "./packages/generator" },
-    { "path": "./packages/differential" }
+    { "path": "./packages/differential" },
+    { "path": "./packages/passport" },
+    { "path": "./packages/pipeline" }
   ]
 }

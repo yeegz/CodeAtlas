@@ -1,0 +1,18 @@
+{
+  "name": "@codeatlas/passport",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@codeatlas/analyzer": "workspace:*",
+    "@codeatlas/evidence": "workspace:*",
+    "@codeatlas/runner": "workspace:*",
+    "json-canonicalize": "2.0.0"
+  }
+}

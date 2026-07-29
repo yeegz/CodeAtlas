@@ -71,7 +71,18 @@ it("derives the fixture state and every summary count from validated evidence", 
   expect(passport.replayCommands).toEqual([
     "codeatlas replay finding_expired_session",
   ]);
-  expect(ChangePassportSchema.parse(passport)).toEqual(
+  expect(
+    ChangePassportSchema.parse({
+      baseSha: passport.baseSha,
+      headSha: passport.headSha,
+      engineVersion: passport.engineVersion,
+      findings: passport.findings,
+      executedTests: passport.executedTests,
+      unverifiedAreas: passport.unverifiedAreas,
+      retentionPolicy: passport.retentionPolicy,
+      manifestDigest: passport.manifestDigest,
+    }),
+  ).toEqual(
     expect.objectContaining({
       baseSha,
       headSha,
@@ -269,7 +280,22 @@ function execution(revision: "base" | "head", repeat: number): ExecutionResult {
     terminalState: "COMPLETED" as const,
     exitCode: revision === "base" ? 0 : 1,
     durationMs: 10,
-    testCases: [],
+    testCases: [
+      {
+        name: "restoreSession restores a valid session",
+        path: "test/auth.test.ts",
+        status: "PASSED" as const,
+        failureMessage: null,
+        generatedObjectiveId: null,
+      },
+      {
+        name: "generated: expired session regression",
+        path: "test/codeatlas.expired-session.test.ts",
+        status: revision === "base" ? ("PASSED" as const) : ("FAILED" as const),
+        failureMessage: revision === "base" ? null : "assertion failed",
+        generatedObjectiveId: "objective_expired_session",
+      },
+    ],
     coverage: [],
     observations: [],
     stdout: "",

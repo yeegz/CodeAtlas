@@ -102,6 +102,51 @@ importers:
         specifier: workspace:*
         version: link:../selector
 
+  packages/passport:
+    dependencies:
+      '@codeatlas/analyzer':
+        specifier: workspace:*
+        version: link:../analyzer
+      '@codeatlas/evidence':
+        specifier: workspace:*
+        version: link:../evidence
+      '@codeatlas/runner':
+        specifier: workspace:*
+        version: link:../runner
+      json-canonicalize:
+        specifier: 2.0.0
+        version: 2.0.0
+
+  packages/pipeline:
+    dependencies:
+      '@codeatlas/analyzer':
+        specifier: workspace:*
+        version: link:../analyzer
+      '@codeatlas/differential':
+        specifier: workspace:*
+        version: link:../differential
+      '@codeatlas/evidence':
+        specifier: workspace:*
+        version: link:../evidence
+      '@codeatlas/generator':
+        specifier: workspace:*
+        version: link:../generator
+      '@codeatlas/passport':
+        specifier: workspace:*
+        version: link:../passport
+      '@codeatlas/runner':
+        specifier: workspace:*
+        version: link:../runner
+      '@codeatlas/selector':
+        specifier: workspace:*
+        version: link:../selector
+      json-canonicalize:
+        specifier: 2.0.0
+        version: 2.0.0
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
   packages/runner:
     dependencies:
       '@codeatlas/analyzer':
