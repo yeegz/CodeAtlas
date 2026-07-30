@@ -5,3 +5,8 @@ docs/superpowers/
 coverage/
 dist/
 pnpm-lock.yaml
+
+# Fixture snapshots are immutable analyzed content, not project source. Their
+# exact bytes determine the content snapshot digests that tests assert against,
+# so reformatting them would silently change every recorded analysis id.
+fixtures/
