@@ -9,6 +9,7 @@
     { "path": "./packages/generator" },
     { "path": "./packages/differential" },
     { "path": "./packages/passport" },
-    { "path": "./packages/pipeline" }
+    { "path": "./packages/pipeline" },
+    { "path": "./apps/cli" }
   ]
 }
