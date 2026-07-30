@@ -7,7 +7,7 @@ CodeAtlas is an evidence-first change intelligence system for TypeScript and Jav
 Instead of another opaque score or AI-authored review summary, CodeAtlas is designed around inspectable claims: immutable source citations, static graph paths, observed runtime behavior, reproducible commands, explicit limitations, and cryptographically verifiable manifests.
 
 > [!IMPORTANT]
-> CodeAtlas is under active development. It is not yet a hosted service, GitHub App, or production sandbox. The current implementation lives on [`codex/codeatlas-evidence-core`](https://github.com/yeegz/CodeAtlas/tree/codex/codeatlas-evidence-core), and its local runner must only be used with repositories you trust.
+> CodeAtlas is under active development. It is not yet a hosted service, GitHub App, or production sandbox. The local evidence core is complete and green on [`codex/codeatlas-evidence-core`](https://github.com/yeegz/CodeAtlas/tree/codex/codeatlas-evidence-core), and its local runner must only be used with repositories you trust.
 
 ## What CodeAtlas is building
 
@@ -29,24 +29,51 @@ A completed analysis should answer five practical questions:
 4. Which claims are confirmed, probable, possible, or still unverified?
 5. Can another developer reproduce and verify the evidence independently?
 
+## Try it
+
+Analyse the seeded authentication comparison and replay the finding it proves:
+
+```bash
+node apps/cli/bin/codeatlas.mjs analyze --base fixtures/auth-regression/base --head fixtures/auth-regression/head --out .codeatlas/demo
+```
+
+The command exits `2` for `ACTION_REQUIRED` and reports one confirmed
+regression: expired sessions return `HTTP 401 with SESSION_EXPIRED` on base and
+`HTTP 500 with INTERNAL_ERROR` on head. The Proof Card prints its own
+reproduction command, which works from the repository root:
+
+```bash
+node apps/cli/bin/codeatlas.mjs replay finding_expired_session
+```
+
+That verifies every artifact digest, the manifest digest and the manifest
+signature before starting any test process, re-executes the recorded generated
+test on both revisions, and prints `REPRODUCED finding_expired_session`.
+
+The same analysis renders in the workspace:
+
+```bash
+pnpm --filter @codeatlas/web dev
+```
+
 ## Current implementation status
 
-| Capability                                               | Status                         |
-| -------------------------------------------------------- | ------------------------------ |
-| Strict evidence, finding, Passport, and manifest schemas | Review complete                |
-| Canonical SHA-256 + Ed25519 manifest signing             | Review complete                |
-| Non-executing TypeScript/JavaScript snapshot analysis    | Review complete                |
-| Changed-line, symbol, call, export, and test mapping     | Review complete                |
-| Deterministic, explainable test selection                | Review complete                |
-| Bounded local Vitest execution                           | Security hardening in progress |
-| Generated regression tests and differential findings     | Next                           |
-| Change Passport pipeline, CLI, and replay                | Planned in this milestone      |
-| Forensic Cartography web workspace                       | Planned in this milestone      |
-| Firebase control plane and hosting                       | Later production milestone     |
-| GKE Autopilot + gVisor hostile-code sandbox              | Later production milestone     |
-| GitHub App for public/private repositories               | Later production milestone     |
+| Capability                                               | Status                     |
+| -------------------------------------------------------- | -------------------------- |
+| Strict evidence, finding, Passport, and manifest schemas | Complete                   |
+| Canonical SHA-256 + Ed25519 manifest signing             | Complete                   |
+| Non-executing TypeScript/JavaScript snapshot analysis    | Complete                   |
+| Changed-line, symbol, call, export, and test mapping     | Complete                   |
+| Deterministic, explainable test selection                | Complete                   |
+| Bounded local Vitest execution                           | Complete (trusted code)    |
+| Generated regression tests and differential findings     | Complete                   |
+| Change Passport pipeline, CLI, and replay                | Complete                   |
+| Forensic Cartography web workspace                       | Complete                   |
+| Firebase control plane and hosting                       | Later production milestone |
+| GKE Autopilot + gVisor hostile-code sandbox              | Later production milestone |
+| GitHub App for public/private repositories               | Later production milestone |
 
-The development branch currently includes committed RED tests for the next runner hardening pass. That is an intentional pause point, not a green release tag.
+Everything marked complete runs locally against local snapshots. No hosted, private-repository, Firebase, or GKE capability exists yet.
 
 ## Design principles
 
@@ -61,18 +88,25 @@ The development branch currently includes committed RED tests for the next runne
 
 ```text
 packages/
-  evidence/   Validated evidence, findings, Passports, and signed manifests
-  analyzer/   Static snapshot mapping and content-addressed change analysis
-  selector/   Deterministic graph-based test selection and explanations
-  runner/     Bounded trusted-local Vitest execution (in hardening)
+  evidence/      Validated evidence, findings, Passports, and signed manifests
+  analyzer/      Static snapshot mapping and content-addressed change analysis
+  selector/      Deterministic graph-based test selection and explanations
+  runner/        Bounded trusted-local Vitest execution
+  generator/     Evidence-targeted objectives and the narrow template generator
+  differential/  Base/head comparison and evidence-eligibility rules
+  passport/      Change Passport assembly and JSON/Markdown export
+  pipeline/      End-to-end orchestration and the content-addressed artifact store
+apps/
+  cli/           `codeatlas analyze` and `codeatlas replay`
+  web/           The Forensic Cartography workspace
 fixtures/
   auth-regression/  Base/head snapshots with an intentionally hidden regression
-docs/superpowers/
-  specs/      Approved product and architecture specification
-  plans/      Task-level Evidence Core implementation plan
+test/e2e/        CLI and browser acceptance tests
+docs/
+  architecture/  Evidence core architecture
+  security/      The local execution boundary
+  superpowers/   Approved specification and the task-level plan
 ```
-
-Generator, differential, Passport pipeline, CLI, and web packages will land as the vertical slice progresses.
 
 ## Development setup
 
@@ -90,29 +124,49 @@ corepack enable
 pnpm install --frozen-lockfile
 ```
 
-Run the review-complete core packages:
+Node 25 and newer no longer bundle Corepack. If `corepack enable` is unavailable, install the pinned package manager directly with `npm install -g pnpm@11.9.0`.
+
+Acceptance tests drive a real browser, so install it once:
 
 ```bash
-pnpm vitest run packages/evidence/test packages/analyzer/test packages/selector/test
-pnpm typecheck
-pnpm lint
+pnpm exec playwright install chromium
 ```
 
-The full runner suite is intentionally RED at the current pause commit while the next security invariants are implemented. See the implementation plan and branch history before treating a failure as a regression.
+Then run everything:
+
+```bash
+pnpm verify
+```
+
+`verify` runs formatting, lint, types, the unit and integration suites, the CLI and browser acceptance tests, and a production web build. The suites execute the fixture tests for real on both revisions, so a full run takes several minutes.
+
+To explore the workspace, start the app in demo mode:
+
+```bash
+pnpm --filter @codeatlas/web dev
+```
+
+The `dev` script sets `CODEATLAS_DEMO_MODE=true`. Without it, `POST /api/demo` returns 404 and the workspace offers no way to execute repository code.
 
 ## Security boundary
 
-The current `LocalExecutionProvider` copies a snapshot into a temporary directory, validates paths, limits time/output/file count, minimizes the child environment, invokes executables without shell interpolation, and removes the temporary run directory. It still executes repository code as the host user.
+`LocalExecutionProvider` copies a snapshot into a temporary directory, validates paths, limits time/output/file count, minimizes the child environment, invokes executables without shell interpolation, and removes the temporary run directory. It still executes repository code as the host user.
 
 **Do not use the local provider with untrusted third-party repositories.** Hosted third-party execution will not ship until the GKE Autopilot + gVisor sandbox, source broker, egress policy, quotas, and adversarial acceptance tests are complete.
 
-For vulnerability reporting, see [SECURITY.md](SECURITY.md).
+The full boundary, including what the local signing key does and does not prove, is documented in [docs/security/local-execution-boundary.md](docs/security/local-execution-boundary.md). For vulnerability reporting, see [SECURITY.md](SECURITY.md).
+
+## Documentation
+
+- [Evidence core architecture](docs/architecture/evidence-core.md)
+- [The local execution boundary](docs/security/local-execution-boundary.md)
+- [Evidence Manifest v1](docs/evidence-manifest-v1.md)
+- [Product design specification](docs/superpowers/specs/2026-07-29-codeatlas-product-design.md)
+- [Evidence core implementation plan](docs/superpowers/plans/2026-07-29-codeatlas-evidence-core-vertical-slice.md)
 
 ## Product direction
 
 The interface is called **Forensic Cartography**: a calm, map-first workspace where changed nodes, observed runtime paths, inferred edges, failures, evidence, and limitations remain visually distinct. The design avoids decorative dashboards, fake confidence metrics, glassmorphism, and unsupported “safe to merge” claims.
-
-The approved architecture and visual/product decisions are documented in [`docs/superpowers/specs/2026-07-29-codeatlas-product-design.md`](docs/superpowers/specs/2026-07-29-codeatlas-product-design.md). The active vertical-slice plan is in [`docs/superpowers/plans/2026-07-29-codeatlas-evidence-core-vertical-slice.md`](docs/superpowers/plans/2026-07-29-codeatlas-evidence-core-vertical-slice.md).
 
 ## Contributing
 

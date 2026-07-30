@@ -13,3 +13,9 @@ dist/
 
 # Local editor and preview launch configuration.
 .claude/
+
+# Playwright acceptance output.
+test-results/
+playwright-report/
+blob-report/
+.playwright/

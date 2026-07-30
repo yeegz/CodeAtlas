@@ -1,9 +1,9 @@
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, type KeyObject } from "node:crypto";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import { computeSnapshotDigest } from "@codeatlas/analyzer";
-import { deriveAnalysisId } from "@codeatlas/evidence";
+import { deriveAnalysisId, verifyManifest } from "@codeatlas/evidence";
 import { TemplateTestGenerator } from "@codeatlas/generator";
 import { LocalArtifactStore, analyzeComparison } from "@codeatlas/pipeline";
 import type { AnalysisOutput } from "@codeatlas/pipeline";
@@ -170,7 +170,25 @@ async function execute(): Promise<WorkspaceModel> {
     signingKey: privateKey,
   });
 
+  assertVerifiedManifest(output.signedManifest, output.publicKey);
   return toWorkspaceModel(output);
+}
+
+export const UNVERIFIED_MANIFEST_MESSAGE =
+  "The Evidence Manifest signature could not be verified. CodeAtlas will not present this analysis as evidence.";
+
+/**
+ * The workspace may only render evidence whose signed manifest still verifies.
+ * A modified manifest is refused here rather than displayed with a warning,
+ * because a displayed finding is a claim that the evidence is real.
+ */
+export function assertVerifiedManifest(
+  signed: unknown,
+  publicKey: KeyObject,
+): void {
+  if (!verifyManifest(signed, publicKey)) {
+    throw new Error(UNVERIFIED_MANIFEST_MESSAGE);
+  }
 }
 
 /**

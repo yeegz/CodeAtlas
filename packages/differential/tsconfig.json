@@ -8,10 +8,10 @@
   },
   "include": ["src/**/*.ts"],
   "references": [
-    { "path": "../evidence" },
-    { "path": "../analyzer" },
-    { "path": "../selector" },
-    { "path": "../runner" },
-    { "path": "../generator" }
+    { "path": "../evidence/tsconfig.json" },
+    { "path": "../analyzer/tsconfig.json" },
+    { "path": "../selector/tsconfig.json" },
+    { "path": "../runner/tsconfig.json" },
+    { "path": "../generator/tsconfig.json" }
   ]
 }

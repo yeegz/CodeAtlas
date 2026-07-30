@@ -260,6 +260,13 @@ export class LocalExecutionProvider implements ExecutionProvider {
         CI: "1",
         NPM_CONFIG_CACHE: temporaryCache,
         XDG_CACHE_HOME: temporaryCache,
+        // pnpm otherwise reconciles dependencies before `exec`. In a sandbox
+        // whose node_modules is a link to the host workspace, that check writes
+        // into the host tree from inside the execution boundary, and its cost
+        // grows with the workspace rather than with the snapshot under test.
+        // The dependencies are already installed and pinned by the lockfile
+        // hashed into the environment digest.
+        npm_config_verify_deps_before_run: "false",
       };
       const vitestCliPath = join(
         snapshotCopy,

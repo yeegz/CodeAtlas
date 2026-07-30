@@ -8,9 +8,9 @@
   },
   "include": ["src/**/*.ts"],
   "references": [
-    { "path": "../evidence" },
-    { "path": "../analyzer" },
-    { "path": "../selector" },
-    { "path": "../runner" }
+    { "path": "../evidence/tsconfig.json" },
+    { "path": "../analyzer/tsconfig.json" },
+    { "path": "../selector/tsconfig.json" },
+    { "path": "../runner/tsconfig.json" }
   ]
 }

@@ -2,14 +2,14 @@
   "extends": "./tsconfig.base.json",
   "files": [],
   "references": [
-    { "path": "./packages/evidence" },
-    { "path": "./packages/analyzer" },
-    { "path": "./packages/selector" },
-    { "path": "./packages/runner" },
-    { "path": "./packages/generator" },
-    { "path": "./packages/differential" },
-    { "path": "./packages/passport" },
-    { "path": "./packages/pipeline" },
-    { "path": "./apps/cli" }
+    { "path": "./packages/evidence/tsconfig.json" },
+    { "path": "./packages/analyzer/tsconfig.json" },
+    { "path": "./packages/selector/tsconfig.json" },
+    { "path": "./packages/runner/tsconfig.json" },
+    { "path": "./packages/generator/tsconfig.json" },
+    { "path": "./packages/differential/tsconfig.json" },
+    { "path": "./packages/passport/tsconfig.json" },
+    { "path": "./packages/pipeline/tsconfig.json" },
+    { "path": "./apps/cli/tsconfig.json" }
   ]
 }

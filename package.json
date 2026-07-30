@@ -14,9 +14,14 @@
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint .",
     "format:check": "prettier --check .",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "test:e2e": "playwright test",
+    "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm test:e2e && pnpm --filter @codeatlas/web build"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
+    "@codeatlas/evidence": "workspace:*",
+    "@playwright/test": "1.62.0",
     "@types/node": "24.13.3",
     "@vitest/coverage-v8": "4.1.10",
     "eslint": "9.39.5",

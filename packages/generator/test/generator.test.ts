@@ -10,6 +10,14 @@ import {
 } from "../src/index.js";
 import * as GeneratorModule from "../src/index.js";
 
+/**
+ * Cases below spawn real Vitest processes in an isolated snapshot, several per
+ * execution. That cost is dominated by child process startup against the
+ * workspace dependency tree, so the budget bounds behaviour, not performance,
+ * and must not be read as a latency assertion.
+ */
+const EXECUTION_BUDGET_MS = 120_000;
+
 const workspaceRoot = resolve(import.meta.dirname, "../../..");
 const snapshotSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const generatedContent = `import { describe, expect, it } from "vitest";
@@ -229,73 +237,77 @@ describe("TemplateTestGenerator", () => {
     expect(() => validateGeneratedTest(objective, candidate)).toThrow();
   });
 
-  it("executes the generated test as a base pass and head regression observation", async () => {
-    const objective = deriveTestObjectives(objectiveInput)[0];
-    expect(objective).toBeDefined();
-    const generated = await new TemplateTestGenerator().generate(objective!);
-    expect(generated.state).toBe("GENERATED");
-    if (generated.state !== "GENERATED") throw new Error(generated.reason);
+  it(
+    "executes the generated test as a base pass and head regression observation",
+    async () => {
+      const objective = deriveTestObjectives(objectiveInput)[0];
+      expect(objective).toBeDefined();
+      const generated = await new TemplateTestGenerator().generate(objective!);
+      expect(generated.state).toBe("GENERATED");
+      if (generated.state !== "GENERATED") throw new Error(generated.reason);
 
-    const provider = new LocalExecutionProvider({ workspaceRoot });
-    const revisions = ["base", "head"] as const;
-    const results = await Promise.all(
-      revisions.map(async (revision) => {
-        const snapshotRoot = resolve(
-          workspaceRoot,
-          `fixtures/auth-regression/${revision}`,
-        );
-        return provider.run({
-          analysisId: `analysis-generator-${revision}`,
-          revision,
-          snapshotRoot,
-          snapshotSha: await computeSnapshotDigest(snapshotRoot),
-          testPaths: [],
-          generatedFiles: [generated.test],
-          policy: {
-            timeoutMs: 10_000,
-            maxOutputBytes: 64 * 1024,
-            maxFiles: 20,
-          },
-        });
-      }),
-    );
-    const [base, head] = results;
+      const provider = new LocalExecutionProvider({ workspaceRoot });
+      const revisions = ["base", "head"] as const;
+      const results = await Promise.all(
+        revisions.map(async (revision) => {
+          const snapshotRoot = resolve(
+            workspaceRoot,
+            `fixtures/auth-regression/${revision}`,
+          );
+          return provider.run({
+            analysisId: `analysis-generator-${revision}`,
+            revision,
+            snapshotRoot,
+            snapshotSha: await computeSnapshotDigest(snapshotRoot),
+            testPaths: [],
+            generatedFiles: [generated.test],
+            policy: {
+              timeoutMs: 10_000,
+              maxOutputBytes: 64 * 1024,
+              maxFiles: 20,
+            },
+          });
+        }),
+      );
+      const [base, head] = results;
 
-    expect(base).toEqual(
-      expect.objectContaining({
-        terminalState: "COMPLETED",
-        exitCode: 0,
-        testCases: [
-          expect.objectContaining({
-            name: expect.stringContaining(
-              "generated: expired session regression",
-            ),
-            status: "PASSED",
-            generatedObjectiveId: objective!.id,
-          }),
-        ],
-      }),
-    );
-    expect(head).toEqual(
-      expect.objectContaining({
-        terminalState: "COMPLETED",
-        exitCode: 1,
-        testCases: [
-          expect.objectContaining({
-            name: expect.stringContaining(
-              "generated: expired session regression",
-            ),
-            status: "FAILED",
-            generatedObjectiveId: objective!.id,
-          }),
-        ],
-        observations: [
-          expect.objectContaining({
-            expected: { httpStatus: 401, code: "SESSION_EXPIRED" },
-            actual: { httpStatus: 500, code: "INTERNAL_ERROR" },
-          }),
-        ],
-      }),
-    );
-  }, 20_000);
+      expect(base).toEqual(
+        expect.objectContaining({
+          terminalState: "COMPLETED",
+          exitCode: 0,
+          testCases: [
+            expect.objectContaining({
+              name: expect.stringContaining(
+                "generated: expired session regression",
+              ),
+              status: "PASSED",
+              generatedObjectiveId: objective!.id,
+            }),
+          ],
+        }),
+      );
+      expect(head).toEqual(
+        expect.objectContaining({
+          terminalState: "COMPLETED",
+          exitCode: 1,
+          testCases: [
+            expect.objectContaining({
+              name: expect.stringContaining(
+                "generated: expired session regression",
+              ),
+              status: "FAILED",
+              generatedObjectiveId: objective!.id,
+            }),
+          ],
+          observations: [
+            expect.objectContaining({
+              expected: { httpStatus: 401, code: "SESSION_EXPIRED" },
+              actual: { httpStatus: 500, code: "INTERNAL_ERROR" },
+            }),
+          ],
+        }),
+      );
+    },
+    EXECUTION_BUDGET_MS,
+  );
 });

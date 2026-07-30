@@ -28,6 +28,14 @@ import type {
   ExecutionResult,
 } from "../src/execution-provider.js";
 
+/**
+ * Cases below spawn real Vitest processes in an isolated snapshot, several per
+ * execution. That cost is dominated by child process startup against the
+ * workspace dependency tree, so the budget bounds behaviour, not performance,
+ * and must not be read as a latency assertion.
+ */
+const EXECUTION_BUDGET_MS = 120_000;
+
 const workspaceRoot = resolve(import.meta.dirname, "../../..");
 const snapshotShas = {
   base: "abc58c76e50aaf580628c06e9b6e29e770f18a79",
@@ -60,117 +68,131 @@ function request(revision: "base" | "head"): ExecutionRequest {
 }
 
 describe("LocalExecutionProvider", () => {
-  it("runs the selected auth test against both snapshot revisions", async () => {
-    const provider = new LocalExecutionProvider({ workspaceRoot });
-    const dependenciesBefore = await workspaceDependencyState();
+  it(
+    "runs the selected auth test against both snapshot revisions",
+    async () => {
+      const provider = new LocalExecutionProvider({ workspaceRoot });
+      const dependenciesBefore = await workspaceDependencyState();
 
-    const [base, head] = await Promise.all([
-      provider.run(request("base")),
-      provider.run(request("head")),
-    ]);
+      const [base, head] = await Promise.all([
+        provider.run(request("base")),
+        provider.run(request("head")),
+      ]);
 
-    for (const result of [base, head]) {
-      expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
-      expect(result.testCases).toHaveLength(1);
-      expect(result.testCases[0]?.status).toBe("PASSED");
-      expect(result.coverage).toHaveLength(1);
-      expect(result.coverage[0]?.path).toBe("src/auth.ts");
-      expect(result.coverage[0]?.coveredLines.length).toBeGreaterThan(0);
-      expect(
-        Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr),
-      ).toBeLessThan(64 * 1024);
-    }
-    expect(base.snapshotSha).toBe(snapshotShas.base);
-    expect(head.snapshotSha).toBe(snapshotShas.head);
-    expect(base.snapshotSha).not.toBe(head.snapshotSha);
-    expect(base.executionId).toMatch(/^[0-9a-f-]{36}$/u);
-    expect(head.executionId).toMatch(/^[0-9a-f-]{36}$/u);
-    expect(base.executionId).not.toBe(head.executionId);
-    expect(base.resultDigest).toBe(executionResultDigest(base));
-    expect(head.resultDigest).toBe(executionResultDigest(head));
-    expect(base.resultDigest).not.toBe(head.resultDigest);
-    expect(base.environmentDigest).toMatch(/^[a-f0-9]{64}$/u);
-    expect(head.environmentDigest).toBe(base.environmentDigest);
-    expect(await workspaceDependencyState()).toEqual(dependenciesBefore);
-  }, 20_000);
+      for (const result of [base, head]) {
+        expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+        expect(result.testCases).toHaveLength(1);
+        expect(result.testCases[0]?.status).toBe("PASSED");
+        expect(result.coverage).toHaveLength(1);
+        expect(result.coverage[0]?.path).toBe("src/auth.ts");
+        expect(result.coverage[0]?.coveredLines.length).toBeGreaterThan(0);
+        expect(
+          Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr),
+        ).toBeLessThan(64 * 1024);
+      }
+      expect(base.snapshotSha).toBe(snapshotShas.base);
+      expect(head.snapshotSha).toBe(snapshotShas.head);
+      expect(base.snapshotSha).not.toBe(head.snapshotSha);
+      expect(base.executionId).toMatch(/^[0-9a-f-]{36}$/u);
+      expect(head.executionId).toMatch(/^[0-9a-f-]{36}$/u);
+      expect(base.executionId).not.toBe(head.executionId);
+      expect(base.resultDigest).toBe(executionResultDigest(base));
+      expect(head.resultDigest).toBe(executionResultDigest(head));
+      expect(base.resultDigest).not.toBe(head.resultDigest);
+      expect(base.environmentDigest).toMatch(/^[a-f0-9]{64}$/u);
+      expect(head.environmentDigest).toBe(base.environmentDigest);
+      expect(await workspaceDependencyState()).toEqual(dependenciesBefore);
+    },
+    EXECUTION_BUDGET_MS,
+  );
 
-  it("terminates a real Vitest run at the timeout without retrying and cleans up", async () => {
-    const temporaryParent = await mkdtemp(
-      join(tmpdir(), "codeatlas-timeout-test-"),
-    );
-    try {
-      const provider = new LocalExecutionProvider({
-        workspaceRoot,
-        temporaryParent,
-      });
-      const result = await provider.run({
-        ...request("base"),
-        testPaths: [],
-        generatedFiles: [
+  it(
+    "terminates a real Vitest run at the timeout without retrying and cleans up",
+    async () => {
+      const temporaryParent = await mkdtemp(
+        join(tmpdir(), "codeatlas-timeout-test-"),
+      );
+      try {
+        const provider = new LocalExecutionProvider({
+          workspaceRoot,
+          temporaryParent,
+        });
+        const result = await provider.run({
+          ...request("base"),
+          testPaths: [],
+          generatedFiles: [
+            {
+              path: "test/timeout.generated.test.ts",
+              content:
+                'import { it } from "vitest";\nit("waits", async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });\n',
+              objectiveId: "timeout-objective",
+              evidenceIds: ["evidence-timeout"],
+              expectedBehavior: { httpStatus: 200, code: "OK" },
+            },
+          ],
+          policy: { timeoutMs: 50, maxOutputBytes: 64 * 1024, maxFiles: 10 },
+        });
+
+        expect(result.terminalState).toBe("TIMED_OUT");
+        expect(result.exitCode).toBeNull();
+        expect(result.testCases).toMatchObject([
           {
             path: "test/timeout.generated.test.ts",
-            content:
-              'import { it } from "vitest";\nit("waits", async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });\n',
-            objectiveId: "timeout-objective",
-            evidenceIds: ["evidence-timeout"],
-            expectedBehavior: { httpStatus: 200, code: "OK" },
+            status: "SKIPPED",
+            generatedObjectiveId: "timeout-objective",
           },
-        ],
-        policy: { timeoutMs: 50, maxOutputBytes: 64 * 1024, maxFiles: 10 },
-      });
+        ]);
+        expect(await readdir(temporaryParent)).toEqual([]);
+      } finally {
+        await rm(temporaryParent, { recursive: true, force: true });
+      }
+    },
+    EXECUTION_BUDGET_MS,
+  );
 
-      expect(result.terminalState).toBe("TIMED_OUT");
-      expect(result.exitCode).toBeNull();
-      expect(result.testCases).toMatchObject([
-        {
-          path: "test/timeout.generated.test.ts",
-          status: "SKIPPED",
-          generatedObjectiveId: "timeout-objective",
-        },
-      ]);
-      expect(await readdir(temporaryParent)).toEqual([]);
-    } finally {
-      await rm(temporaryParent, { recursive: true, force: true });
-    }
-  }, 20_000);
-
-  it("stops a real Vitest run at the aggregate output cap and cleans up", async () => {
-    const temporaryParent = await mkdtemp(
-      join(tmpdir(), "codeatlas-output-test-"),
-    );
-    try {
-      const provider = new LocalExecutionProvider({
-        workspaceRoot,
-        temporaryParent,
-      });
-      const result = await provider.run({
-        ...request("base"),
-        testPaths: [],
-        generatedFiles: [
-          {
-            path: "test/output.generated.test.ts",
-            content:
-              'import { it } from "vitest";\nit("prints bounded output", async () => { console.log("API_TOKEN=local-secret"); await new Promise((resolve) => setTimeout(resolve, 10)); console.log("x".repeat(4096)); });\n',
-            objectiveId: "output-objective",
-            evidenceIds: ["evidence-output"],
-            expectedBehavior: { httpStatus: 200, code: "OK" },
-          },
-        ],
-        policy: { timeoutMs: 10_000, maxOutputBytes: 1024, maxFiles: 10 },
-      });
-
-      expect(result.terminalState, JSON.stringify(result)).toBe("OUTPUT_LIMIT");
-      expect(
-        Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr),
-      ).toBeLessThanOrEqual(1024);
-      expect(`${result.stdout}\n${result.stderr}`).not.toContain(
-        "local-secret",
+  it(
+    "stops a real Vitest run at the aggregate output cap and cleans up",
+    async () => {
+      const temporaryParent = await mkdtemp(
+        join(tmpdir(), "codeatlas-output-test-"),
       );
-      expect(await readdir(temporaryParent)).toEqual([]);
-    } finally {
-      await rm(temporaryParent, { recursive: true, force: true });
-    }
-  }, 20_000);
+      try {
+        const provider = new LocalExecutionProvider({
+          workspaceRoot,
+          temporaryParent,
+        });
+        const result = await provider.run({
+          ...request("base"),
+          testPaths: [],
+          generatedFiles: [
+            {
+              path: "test/output.generated.test.ts",
+              content:
+                'import { it } from "vitest";\nit("prints bounded output", async () => { console.log("API_TOKEN=local-secret"); await new Promise((resolve) => setTimeout(resolve, 10)); console.log("x".repeat(4096)); });\n',
+              objectiveId: "output-objective",
+              evidenceIds: ["evidence-output"],
+              expectedBehavior: { httpStatus: 200, code: "OK" },
+            },
+          ],
+          policy: { timeoutMs: 10_000, maxOutputBytes: 1024, maxFiles: 10 },
+        });
+
+        expect(result.terminalState, JSON.stringify(result)).toBe(
+          "OUTPUT_LIMIT",
+        );
+        expect(
+          Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr),
+        ).toBeLessThanOrEqual(1024);
+        expect(`${result.stdout}\n${result.stderr}`).not.toContain(
+          "local-secret",
+        );
+        expect(await readdir(temporaryParent)).toEqual([]);
+      } finally {
+        await rm(temporaryParent, { recursive: true, force: true });
+      }
+    },
+    EXECUTION_BUDGET_MS,
+  );
 
   it("returns FAILED without observations for malformed Vitest JSON and runs once", async () => {
     const fixtureRoot = await mkdtemp(
@@ -204,86 +226,96 @@ describe("LocalExecutionProvider", () => {
     }
   });
 
-  it("does not promote noncanonical object assertions to observations", async () => {
-    const provider = new LocalExecutionProvider({ workspaceRoot });
-    const [passing, failing] = await Promise.all([
-      provider.run({
+  it(
+    "does not promote noncanonical object assertions to observations",
+    async () => {
+      const provider = new LocalExecutionProvider({ workspaceRoot });
+      const [passing, failing] = await Promise.all([
+        provider.run({
+          ...request("base"),
+          testPaths: [],
+          generatedFiles: [
+            {
+              ...generatedFile("test/passing-observation.generated.test.ts"),
+              content:
+                'import { expect, it } from "vitest";\nit("records a passing response", () => {\n  const response = { status: 401, body: { code: "EXPECTED" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "EXPECTED" });\n});\n',
+              objectiveId: "passing-observation",
+              expectedBehavior: { httpStatus: 401, code: "EXPECTED" },
+            },
+          ],
+        }),
+        provider.run({
+          ...request("base"),
+          testPaths: [],
+          generatedFiles: [
+            {
+              ...generatedFile("test/failed-observation.generated.test.ts"),
+              content:
+                'import { expect, it } from "vitest";\nit("records an actual response", () => {\n  const response = { status: 500, body: { code: "ACTUAL" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "EXPECTED" });\n});\n',
+              objectiveId: "failed-observation",
+              expectedBehavior: { httpStatus: 401, code: "EXPECTED" },
+            },
+          ],
+        }),
+      ]);
+
+      expect(passing.terminalState, JSON.stringify(passing)).toBe("COMPLETED");
+      expect(passing.exitCode).toBe(0);
+      expect(passing.testCases).toMatchObject([
+        { status: "PASSED", generatedObjectiveId: "passing-observation" },
+      ]);
+      expect(passing.observations).toEqual([]);
+      expect(failing.terminalState, JSON.stringify(failing)).toBe("COMPLETED");
+      expect(failing.exitCode).toBe(1);
+      expect(failing.testCases).toMatchObject([
+        { status: "FAILED", generatedObjectiveId: "failed-observation" },
+      ]);
+      expect(failing.observations).toEqual([]);
+    },
+    EXECUTION_BUDGET_MS,
+  );
+
+  it(
+    "does not trust a complete structured observation outside the canonical template",
+    async () => {
+      const provider = new LocalExecutionProvider({ workspaceRoot });
+      const result = await provider.run({
         ...request("base"),
         testPaths: [],
         generatedFiles: [
           {
-            ...generatedFile("test/passing-observation.generated.test.ts"),
+            ...generatedFile("test/full-observation.generated.test.ts"),
             content:
-              'import { expect, it } from "vitest";\nit("records a passing response", () => {\n  const response = { status: 401, body: { code: "EXPECTED" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "EXPECTED" });\n});\n',
-            objectiveId: "passing-observation",
-            expectedBehavior: { httpStatus: 401, code: "EXPECTED" },
+              'import { expect, it } from "vitest";\nit("records the complete actual response", () => {\n  const response = { status: 500, body: { code: "INTERNAL_ERROR" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "SESSION_EXPIRED" });\n});\n',
+            objectiveId: "full-observation",
+            expectedBehavior: {
+              httpStatus: 401,
+              code: "SESSION_EXPIRED",
+            },
           },
         ],
-      }),
-      provider.run({
-        ...request("base"),
+      });
+
+      expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+      expect(result.testCases).toMatchObject([
+        { status: "FAILED", generatedObjectiveId: "full-observation" },
+      ]);
+      expect(result.observations).toEqual([]);
+    },
+    EXECUTION_BUDGET_MS,
+  );
+
+  it(
+    "accepts one direct generated test inside one direct describe wrapper",
+    async () => {
+      const provider = new LocalExecutionProvider({ workspaceRoot });
+      const result = await provider.run({
+        ...request("head"),
         testPaths: [],
         generatedFiles: [
           {
-            ...generatedFile("test/failed-observation.generated.test.ts"),
-            content:
-              'import { expect, it } from "vitest";\nit("records an actual response", () => {\n  const response = { status: 500, body: { code: "ACTUAL" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "EXPECTED" });\n});\n',
-            objectiveId: "failed-observation",
-            expectedBehavior: { httpStatus: 401, code: "EXPECTED" },
-          },
-        ],
-      }),
-    ]);
-
-    expect(passing.terminalState, JSON.stringify(passing)).toBe("COMPLETED");
-    expect(passing.exitCode).toBe(0);
-    expect(passing.testCases).toMatchObject([
-      { status: "PASSED", generatedObjectiveId: "passing-observation" },
-    ]);
-    expect(passing.observations).toEqual([]);
-    expect(failing.terminalState, JSON.stringify(failing)).toBe("COMPLETED");
-    expect(failing.exitCode).toBe(1);
-    expect(failing.testCases).toMatchObject([
-      { status: "FAILED", generatedObjectiveId: "failed-observation" },
-    ]);
-    expect(failing.observations).toEqual([]);
-  }, 20_000);
-
-  it("does not trust a complete structured observation outside the canonical template", async () => {
-    const provider = new LocalExecutionProvider({ workspaceRoot });
-    const result = await provider.run({
-      ...request("base"),
-      testPaths: [],
-      generatedFiles: [
-        {
-          ...generatedFile("test/full-observation.generated.test.ts"),
-          content:
-            'import { expect, it } from "vitest";\nit("records the complete actual response", () => {\n  const response = { status: 500, body: { code: "INTERNAL_ERROR" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "SESSION_EXPIRED" });\n});\n',
-          objectiveId: "full-observation",
-          expectedBehavior: {
-            httpStatus: 401,
-            code: "SESSION_EXPIRED",
-          },
-        },
-      ],
-    });
-
-    expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
-    expect(result.testCases).toMatchObject([
-      { status: "FAILED", generatedObjectiveId: "full-observation" },
-    ]);
-    expect(result.observations).toEqual([]);
-  }, 20_000);
-
-  it("accepts one direct generated test inside one direct describe wrapper", async () => {
-    const provider = new LocalExecutionProvider({ workspaceRoot });
-    const result = await provider.run({
-      ...request("head"),
-      testPaths: [],
-      generatedFiles: [
-        {
-          ...generatedFile("test/codeatlas.expired-session.test.ts"),
-          content: `import { describe, expect, it } from "vitest";
+            ...generatedFile("test/codeatlas.expired-session.test.ts"),
+            content: `import { describe, expect, it } from "vitest";
 import { restoreSession } from "../src/auth.js";
 
 describe("generated: expired session regression", () => {
@@ -296,38 +328,40 @@ describe("generated: expired session regression", () => {
   });
 });
 `,
-          objectiveId: "expired-session-objective",
-          expectedBehavior: {
-            httpStatus: 401,
-            code: "SESSION_EXPIRED",
+            objectiveId: "expired-session-objective",
+            expectedBehavior: {
+              httpStatus: 401,
+              code: "SESSION_EXPIRED",
+            },
           },
-        },
-      ],
-    });
+        ],
+      });
 
-    expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
-    expect(result.testCases).toMatchObject([
-      {
-        name: "generated: expired session regression returns SESSION_EXPIRED for a non-refreshable expired token",
-        status: "FAILED",
-        generatedObjectiveId: "expired-session-objective",
-      },
-    ]);
-    expect(
-      result.observations,
-      result.testCases[0]?.failureMessage ?? JSON.stringify(result),
-    ).toEqual([
-      {
-        testName:
-          "generated: expired session regression returns SESSION_EXPIRED for a non-refreshable expired token",
-        path: "test/codeatlas.expired-session.test.ts",
-        generatedObjectiveId: "expired-session-objective",
-        source: "TEST_ASSERTION",
-        expected: { httpStatus: 401, code: "SESSION_EXPIRED" },
-        actual: { httpStatus: 500, code: "INTERNAL_ERROR" },
-      },
-    ]);
-  }, 20_000);
+      expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+      expect(result.testCases).toMatchObject([
+        {
+          name: "generated: expired session regression returns SESSION_EXPIRED for a non-refreshable expired token",
+          status: "FAILED",
+          generatedObjectiveId: "expired-session-objective",
+        },
+      ]);
+      expect(
+        result.observations,
+        result.testCases[0]?.failureMessage ?? JSON.stringify(result),
+      ).toEqual([
+        {
+          testName:
+            "generated: expired session regression returns SESSION_EXPIRED for a non-refreshable expired token",
+          path: "test/codeatlas.expired-session.test.ts",
+          generatedObjectiveId: "expired-session-objective",
+          source: "TEST_ASSERTION",
+          expected: { httpStatus: 401, code: "SESSION_EXPIRED" },
+          actual: { httpStatus: 500, code: "INTERNAL_ERROR" },
+        },
+      ]);
+    },
+    EXECUTION_BUDGET_MS,
+  );
 
   it.each([
     {
@@ -374,28 +408,208 @@ describe("generated wrapper", () => {
       expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
       expect(result.observations).toEqual([]);
     },
-    20_000,
+    EXECUTION_BUDGET_MS,
   );
 
-  it("preserves snapshot Vitest configuration on the ordinary execution path", async () => {
-    const fixtureRoot = await createSnapshot({
-      "package.json": '{"private":true,"type":"module"}\n',
-      "vitest.config.ts":
-        'export default { test: { setupFiles: ["./test/setup.ts"] } };\n',
-      "src/source.ts": "export const value = 1;\n",
-      "test/setup.ts":
-        'globalThis.fixtureResponse = { status: 401, body: { code: "SESSION_EXPIRED" } };\n',
-    });
-    try {
+  it(
+    "preserves snapshot Vitest configuration on the ordinary execution path",
+    async () => {
+      const fixtureRoot = await createSnapshot({
+        "package.json": '{"private":true,"type":"module"}\n',
+        "vitest.config.ts":
+          'export default { test: { setupFiles: ["./test/setup.ts"] } };\n',
+        "src/source.ts": "export const value = 1;\n",
+        "test/setup.ts":
+          'globalThis.fixtureResponse = { status: 401, body: { code: "SESSION_EXPIRED" } };\n',
+      });
+      try {
+        const provider = new LocalExecutionProvider({ workspaceRoot });
+        const result = await provider.run({
+          ...(await snapshotRequest(fixtureRoot, [])),
+          generatedFiles: [
+            {
+              ...generatedFile("test/config.generated.test.ts"),
+              content:
+                'import { expect, it } from "vitest";\nit("uses snapshot setup", () => {\n  const response = globalThis.fixtureResponse;\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "SESSION_EXPIRED" });\n});\n',
+              objectiveId: "config-preservation",
+              expectedBehavior: {
+                httpStatus: 401,
+                code: "SESSION_EXPIRED",
+              },
+            },
+          ],
+        });
+
+        expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+        expect(result.testCases).toMatchObject([
+          { status: "PASSED", generatedObjectiveId: "config-preservation" },
+        ]);
+        expect(result.observations).toEqual([]);
+      } finally {
+        await rm(fixtureRoot, { recursive: true, force: true });
+      }
+    },
+    EXECUTION_BUDGET_MS,
+  );
+
+  it(
+    "fails closed when a generated assertion imports a non-Vitest expect",
+    async () => {
+      const fixtureRoot = await createSnapshot({
+        "package.json": '{"private":true,"type":"module"}\n',
+        "src/no-op-expect.ts":
+          "export function expect(_actual: unknown) { return { toEqual(_expected: unknown) {} }; }\n",
+      });
+      try {
+        const provider = new LocalExecutionProvider({ workspaceRoot });
+        const result = await provider.run({
+          ...(await snapshotRequest(fixtureRoot, [])),
+          generatedFiles: [
+            {
+              ...generatedFile("test/custom-expect.generated.test.ts"),
+              content:
+                'import { expect } from "../src/no-op-expect.ts";\nimport { it } from "vitest";\nit("cannot forge a passing assertion", () => {\n  const response = { status: 599, body: { code: "FORGED" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "EXPECTED" });\n});\n',
+              objectiveId: "custom-expect",
+              expectedBehavior: { httpStatus: 401, code: "EXPECTED" },
+            },
+          ],
+        });
+
+        expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+        expect(result.testCases).toMatchObject([{ status: "PASSED" }]);
+        expect(result.observations).toEqual([]);
+      } finally {
+        await rm(fixtureRoot, { recursive: true, force: true });
+      }
+    },
+    EXECUTION_BUDGET_MS,
+  );
+
+  it(
+    "fails closed when a generated callback shadows the Vitest expect",
+    async () => {
       const provider = new LocalExecutionProvider({ workspaceRoot });
       const result = await provider.run({
-        ...(await snapshotRequest(fixtureRoot, [])),
+        ...request("base"),
+        testPaths: [],
         generatedFiles: [
           {
-            ...generatedFile("test/config.generated.test.ts"),
+            ...generatedFile("test/shadowed-expect.generated.test.ts"),
             content:
-              'import { expect, it } from "vitest";\nit("uses snapshot setup", () => {\n  const response = globalThis.fixtureResponse;\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "SESSION_EXPIRED" });\n});\n',
-            objectiveId: "config-preservation",
+              'import { expect, it } from "vitest";\nit("cannot shadow the assertion API", (expect) => {\n  const response = { status: 599, body: { code: "FORGED" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "EXPECTED" });\n});\n',
+            objectiveId: "shadowed-expect",
+            expectedBehavior: { httpStatus: 401, code: "EXPECTED" },
+          },
+        ],
+      });
+
+      expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+      expect(result.testCases).toMatchObject([{ status: "FAILED" }]);
+      expect(result.observations).toEqual([]);
+    },
+    EXECUTION_BUDGET_MS,
+  );
+
+  it(
+    "fails closed when type-only imports claim assertion provenance",
+    async () => {
+      const fixtureRoot = await createSnapshot({
+        "package.json": '{"private":true,"type":"module"}\n',
+        "src/install-no-op-globals.ts":
+          'import { it as vitestIt } from "vitest";\nObject.assign(globalThis, { it: vitestIt, expect: () => ({ toEqual() {} }) });\n',
+      });
+      try {
+        const provider = new LocalExecutionProvider({ workspaceRoot });
+        const results = await Promise.all(
+          [
+            {
+              name: "type-only clause",
+              path: "test/type-only-clause.generated.test.ts",
+              declaration: 'import type { expect, it } from "vitest";',
+            },
+            {
+              name: "type-only specifier",
+              path: "test/type-only-specifier.generated.test.ts",
+              declaration: 'import { type expect, it } from "vitest";',
+            },
+          ].map(async ({ name, path, declaration }) =>
+            provider.run({
+              ...(await snapshotRequest(fixtureRoot, [])),
+              generatedFiles: [
+                {
+                  ...generatedFile(path),
+                  content: `import "../src/install-no-op-globals.ts";\n${declaration}\nit(${JSON.stringify(name)}, () => {\n  const response = { status: 599, body: { code: "FORGED" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "EXPECTED" });\n});\n`,
+                  objectiveId: name,
+                  expectedBehavior: { httpStatus: 401, code: "EXPECTED" },
+                },
+              ],
+            }),
+          ),
+        );
+
+        expect(
+          results.map((result) => ({
+            terminalState: result.terminalState,
+            testStatus: result.testCases[0]?.status,
+            observations: result.observations,
+          })),
+        ).toEqual([
+          {
+            terminalState: "COMPLETED",
+            testStatus: "PASSED",
+            observations: [],
+          },
+          {
+            terminalState: "COMPLETED",
+            testStatus: "PASSED",
+            observations: [],
+          },
+        ]);
+      } finally {
+        await rm(fixtureRoot, { recursive: true, force: true });
+      }
+    },
+    EXECUTION_BUDGET_MS,
+  );
+
+  it(
+    "does not emit an observation for a hand-thrown forged AssertionError",
+    async () => {
+      const provider = new LocalExecutionProvider({ workspaceRoot });
+      const result = await provider.run({
+        ...request("base"),
+        testPaths: [],
+        generatedFiles: [
+          {
+            ...generatedFile("test/forged-assertion.generated.test.ts"),
+            content:
+              'import { it } from "vitest";\nit("throws an identical forged assertion", () => {\n  throw Object.assign(new Error(\'expected { httpStatus: 599, code: "FORGED" } to deeply equal { httpStatus: 401, code: "EXPECTED" }\'), { name: "AssertionError" });\n});\n',
+            objectiveId: "forged-assertion",
+            expectedBehavior: { httpStatus: 401, code: "EXPECTED" },
+          },
+        ],
+      });
+
+      expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+      expect(result.testCases).toMatchObject([{ status: "FAILED" }]);
+      expect(result.observations).toEqual([]);
+    },
+    EXECUTION_BUDGET_MS,
+  );
+
+  it(
+    "does not accept structured fields thrown before the generated matcher",
+    async () => {
+      const provider = new LocalExecutionProvider({ workspaceRoot });
+      const result = await provider.run({
+        ...request("base"),
+        testPaths: [],
+        generatedFiles: [
+          {
+            ...generatedFile("test/pre-matcher-forgery.generated.test.ts"),
+            content:
+              'import { expect, it } from "vitest";\nit("cannot forge before the matcher", () => {\n  const response = { get status() { throw Object.assign(new Error("forged"), { name: "AssertionError", actual: \'{ "httpStatus": 599, "code": "FORGED" }\', expected: \'{ "httpStatus": 401, "code": "SESSION_EXPIRED" }\' }); }, body: { code: "FORGED" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "SESSION_EXPIRED" });\n});\n',
+            objectiveId: "pre-matcher-forgery",
             expectedBehavior: {
               httpStatus: 401,
               code: "SESSION_EXPIRED",
@@ -405,164 +619,18 @@ describe("generated wrapper", () => {
       });
 
       expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
-      expect(result.testCases).toMatchObject([
-        { status: "PASSED", generatedObjectiveId: "config-preservation" },
-      ]);
+      expect(result.testCases).toMatchObject([{ status: "FAILED" }]);
       expect(result.observations).toEqual([]);
-    } finally {
-      await rm(fixtureRoot, { recursive: true, force: true });
-    }
-  }, 20_000);
+    },
+    EXECUTION_BUDGET_MS,
+  );
 
-  it("fails closed when a generated assertion imports a non-Vitest expect", async () => {
-    const fixtureRoot = await createSnapshot({
-      "package.json": '{"private":true,"type":"module"}\n',
-      "src/no-op-expect.ts":
-        "export function expect(_actual: unknown) { return { toEqual(_expected: unknown) {} }; }\n",
-    });
-    try {
-      const provider = new LocalExecutionProvider({ workspaceRoot });
-      const result = await provider.run({
-        ...(await snapshotRequest(fixtureRoot, [])),
-        generatedFiles: [
-          {
-            ...generatedFile("test/custom-expect.generated.test.ts"),
-            content:
-              'import { expect } from "../src/no-op-expect.ts";\nimport { it } from "vitest";\nit("cannot forge a passing assertion", () => {\n  const response = { status: 599, body: { code: "FORGED" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "EXPECTED" });\n});\n',
-            objectiveId: "custom-expect",
-            expectedBehavior: { httpStatus: 401, code: "EXPECTED" },
-          },
-        ],
-      });
-
-      expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
-      expect(result.testCases).toMatchObject([{ status: "PASSED" }]);
-      expect(result.observations).toEqual([]);
-    } finally {
-      await rm(fixtureRoot, { recursive: true, force: true });
-    }
-  }, 20_000);
-
-  it("fails closed when a generated callback shadows the Vitest expect", async () => {
-    const provider = new LocalExecutionProvider({ workspaceRoot });
-    const result = await provider.run({
-      ...request("base"),
-      testPaths: [],
-      generatedFiles: [
-        {
-          ...generatedFile("test/shadowed-expect.generated.test.ts"),
-          content:
-            'import { expect, it } from "vitest";\nit("cannot shadow the assertion API", (expect) => {\n  const response = { status: 599, body: { code: "FORGED" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "EXPECTED" });\n});\n',
-          objectiveId: "shadowed-expect",
-          expectedBehavior: { httpStatus: 401, code: "EXPECTED" },
-        },
-      ],
-    });
-
-    expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
-    expect(result.testCases).toMatchObject([{ status: "FAILED" }]);
-    expect(result.observations).toEqual([]);
-  }, 20_000);
-
-  it("fails closed when type-only imports claim assertion provenance", async () => {
-    const fixtureRoot = await createSnapshot({
-      "package.json": '{"private":true,"type":"module"}\n',
-      "src/install-no-op-globals.ts":
-        'import { it as vitestIt } from "vitest";\nObject.assign(globalThis, { it: vitestIt, expect: () => ({ toEqual() {} }) });\n',
-    });
-    try {
-      const provider = new LocalExecutionProvider({ workspaceRoot });
-      const results = await Promise.all(
-        [
-          {
-            name: "type-only clause",
-            path: "test/type-only-clause.generated.test.ts",
-            declaration: 'import type { expect, it } from "vitest";',
-          },
-          {
-            name: "type-only specifier",
-            path: "test/type-only-specifier.generated.test.ts",
-            declaration: 'import { type expect, it } from "vitest";',
-          },
-        ].map(async ({ name, path, declaration }) =>
-          provider.run({
-            ...(await snapshotRequest(fixtureRoot, [])),
-            generatedFiles: [
-              {
-                ...generatedFile(path),
-                content: `import "../src/install-no-op-globals.ts";\n${declaration}\nit(${JSON.stringify(name)}, () => {\n  const response = { status: 599, body: { code: "FORGED" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "EXPECTED" });\n});\n`,
-                objectiveId: name,
-                expectedBehavior: { httpStatus: 401, code: "EXPECTED" },
-              },
-            ],
-          }),
-        ),
-      );
-
-      expect(
-        results.map((result) => ({
-          terminalState: result.terminalState,
-          testStatus: result.testCases[0]?.status,
-          observations: result.observations,
-        })),
-      ).toEqual([
-        { terminalState: "COMPLETED", testStatus: "PASSED", observations: [] },
-        { terminalState: "COMPLETED", testStatus: "PASSED", observations: [] },
-      ]);
-    } finally {
-      await rm(fixtureRoot, { recursive: true, force: true });
-    }
-  }, 20_000);
-
-  it("does not emit an observation for a hand-thrown forged AssertionError", async () => {
-    const provider = new LocalExecutionProvider({ workspaceRoot });
-    const result = await provider.run({
-      ...request("base"),
-      testPaths: [],
-      generatedFiles: [
-        {
-          ...generatedFile("test/forged-assertion.generated.test.ts"),
-          content:
-            'import { it } from "vitest";\nit("throws an identical forged assertion", () => {\n  throw Object.assign(new Error(\'expected { httpStatus: 599, code: "FORGED" } to deeply equal { httpStatus: 401, code: "EXPECTED" }\'), { name: "AssertionError" });\n});\n',
-          objectiveId: "forged-assertion",
-          expectedBehavior: { httpStatus: 401, code: "EXPECTED" },
-        },
-      ],
-    });
-
-    expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
-    expect(result.testCases).toMatchObject([{ status: "FAILED" }]);
-    expect(result.observations).toEqual([]);
-  }, 20_000);
-
-  it("does not accept structured fields thrown before the generated matcher", async () => {
-    const provider = new LocalExecutionProvider({ workspaceRoot });
-    const result = await provider.run({
-      ...request("base"),
-      testPaths: [],
-      generatedFiles: [
-        {
-          ...generatedFile("test/pre-matcher-forgery.generated.test.ts"),
-          content:
-            'import { expect, it } from "vitest";\nit("cannot forge before the matcher", () => {\n  const response = { get status() { throw Object.assign(new Error("forged"), { name: "AssertionError", actual: \'{ "httpStatus": 599, "code": "FORGED" }\', expected: \'{ "httpStatus": 401, "code": "SESSION_EXPIRED" }\' }); }, body: { code: "FORGED" } };\n  expect({ httpStatus: response.status, code: response.body.code }).toEqual({ httpStatus: 401, code: "SESSION_EXPIRED" });\n});\n',
-          objectiveId: "pre-matcher-forgery",
-          expectedBehavior: {
-            httpStatus: 401,
-            code: "SESSION_EXPIRED",
-          },
-        },
-      ],
-    });
-
-    expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
-    expect(result.testCases).toMatchObject([{ status: "FAILED" }]);
-    expect(result.observations).toEqual([]);
-  }, 20_000);
-
-  it("does not trust forged structured fields from the generated import", async () => {
-    const fixtureRoot = await createSnapshot({
-      "package.json": '{"private":true,"type":"module"}\n',
-      "src/auth.ts": `import { resolve } from "node:path";
+  it(
+    "does not trust forged structured fields from the generated import",
+    async () => {
+      const fixtureRoot = await createSnapshot({
+        "package.json": '{"private":true,"type":"module"}\n',
+        "src/auth.ts": `import { resolve } from "node:path";
 export function restoreSession() {
   const matcherPath = resolve(import.meta.dirname, "../test/codeatlas.expired-session.test.ts");
   const error = Object.assign(new Error("forged"), {
@@ -574,69 +642,77 @@ export function restoreSession() {
   throw error;
 }
 `,
-    });
-    try {
-      const provider = new LocalExecutionProvider({ workspaceRoot });
-      const result = await provider.run({
-        ...(await snapshotRequest(fixtureRoot, [])),
-        generatedFiles: [canonicalGeneratedFile("forged-import")],
       });
+      try {
+        const provider = new LocalExecutionProvider({ workspaceRoot });
+        const result = await provider.run({
+          ...(await snapshotRequest(fixtureRoot, [])),
+          generatedFiles: [canonicalGeneratedFile("forged-import")],
+        });
 
-      expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
-      expect(result.testCases).toMatchObject([{ status: "FAILED" }]);
-      expect(result.observations).toEqual([]);
-    } finally {
-      await rm(fixtureRoot, { recursive: true, force: true });
-    }
-  }, 20_000);
+        expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+        expect(result.testCases).toMatchObject([{ status: "FAILED" }]);
+        expect(result.observations).toEqual([]);
+      } finally {
+        await rm(fixtureRoot, { recursive: true, force: true });
+      }
+    },
+    EXECUTION_BUDGET_MS,
+  );
 
-  it("does not allow snapshot setup to inject a same-title passing assertion", async () => {
-    const fixtureRoot = await createSnapshot({
-      "package.json": '{"private":true,"type":"module"}\n',
-      "vitest.config.ts":
-        'export default { test: { setupFiles: ["./test/setup.ts"] } };\n',
-      "test/setup.ts": `import { describe, it } from "vitest";
+  it(
+    "does not allow snapshot setup to inject a same-title passing assertion",
+    async () => {
+      const fixtureRoot = await createSnapshot({
+        "package.json": '{"private":true,"type":"module"}\n',
+        "vitest.config.ts":
+          'export default { test: { setupFiles: ["./test/setup.ts"] } };\n',
+        "test/setup.ts": `import { describe, it } from "vitest";
 describe("generated: expired session regression", () => {
   it("returns SESSION_EXPIRED for a non-refreshable expired token", () => {});
 });
 `,
-      "src/auth.ts":
-        'export function restoreSession() { return { status: 401, body: { code: "SESSION_EXPIRED" } }; }\n',
-    });
-    try {
-      const provider = new LocalExecutionProvider({ workspaceRoot });
-      const result = await provider.run({
-        ...(await snapshotRequest(fixtureRoot, [])),
-        generatedFiles: [canonicalGeneratedFile("same-title-injection")],
+        "src/auth.ts":
+          'export function restoreSession() { return { status: 401, body: { code: "SESSION_EXPIRED" } }; }\n',
       });
+      try {
+        const provider = new LocalExecutionProvider({ workspaceRoot });
+        const result = await provider.run({
+          ...(await snapshotRequest(fixtureRoot, [])),
+          generatedFiles: [canonicalGeneratedFile("same-title-injection")],
+        });
 
-      expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
-      expect(result.testCases).toEqual([
-        expect.objectContaining({
-          status: "PASSED",
-          generatedObjectiveId: "same-title-injection",
-        }),
-      ]);
-      expect(result.observations).toEqual([
-        {
-          testName:
-            "generated: expired session regression returns SESSION_EXPIRED for a non-refreshable expired token",
-          path: "test/codeatlas.expired-session.test.ts",
-          generatedObjectiveId: "same-title-injection",
-          source: "TEST_ASSERTION",
-          expected: { httpStatus: 401, code: "SESSION_EXPIRED" },
-          actual: { httpStatus: 401, code: "SESSION_EXPIRED" },
-        },
-      ]);
-    } finally {
-      await rm(fixtureRoot, { recursive: true, force: true });
-    }
-  }, 20_000);
+        expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+        expect(result.testCases).toEqual([
+          expect.objectContaining({
+            status: "PASSED",
+            generatedObjectiveId: "same-title-injection",
+          }),
+        ]);
+        expect(result.observations).toEqual([
+          {
+            testName:
+              "generated: expired session regression returns SESSION_EXPIRED for a non-refreshable expired token",
+            path: "test/codeatlas.expired-session.test.ts",
+            generatedObjectiveId: "same-title-injection",
+            source: "TEST_ASSERTION",
+            expected: { httpStatus: 401, code: "SESSION_EXPIRED" },
+            actual: { httpStatus: 401, code: "SESSION_EXPIRED" },
+          },
+        ]);
+      } finally {
+        await rm(fixtureRoot, { recursive: true, force: true });
+      }
+    },
+    EXECUTION_BUDGET_MS,
+  );
 
-  it("fails closed when the generated import substitutes the result path", async () => {
-    const fixtureRoot = await createSnapshot({
-      "package.json": '{"private":true,"type":"module"}\n',
-      "src/auth.ts": `import { readdirSync, rmSync, writeFileSync } from "node:fs";
+  it(
+    "fails closed when the generated import substitutes the result path",
+    async () => {
+      const fixtureRoot = await createSnapshot({
+        "package.json": '{"private":true,"type":"module"}\n',
+        "src/auth.ts": `import { readdirSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 export function restoreSession() {
   const attemptRoot = resolve(import.meta.dirname, "../..");
@@ -651,20 +727,22 @@ export function restoreSession() {
   return { status: 401, body: { code: "SESSION_EXPIRED" } };
 }
 `,
-    });
-    try {
-      const provider = new LocalExecutionProvider({ workspaceRoot });
-      const result = await provider.run({
-        ...(await snapshotRequest(fixtureRoot, [])),
-        generatedFiles: [canonicalGeneratedFile("result-substitution")],
       });
+      try {
+        const provider = new LocalExecutionProvider({ workspaceRoot });
+        const result = await provider.run({
+          ...(await snapshotRequest(fixtureRoot, [])),
+          generatedFiles: [canonicalGeneratedFile("result-substitution")],
+        });
 
-      expect(result.terminalState).toBe("FAILED");
-      expect(result.observations).toEqual([]);
-    } finally {
-      await rm(fixtureRoot, { recursive: true, force: true });
-    }
-  }, 20_000);
+        expect(result.terminalState).toBe("FAILED");
+        expect(result.observations).toEqual([]);
+      } finally {
+        await rm(fixtureRoot, { recursive: true, force: true });
+      }
+    },
+    EXECUTION_BUDGET_MS,
+  );
 
   it("rejects an unauthenticated report for the canonical generated test", async () => {
     const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-auth-report-"));
@@ -690,18 +768,22 @@ writeResult({ testResults: [suite(resolve(cwd, "test/codeatlas.expired-session.t
     }
   });
 
-  it("does not emit a passing observation for a no-op generated test", async () => {
-    const provider = new LocalExecutionProvider({ workspaceRoot });
-    const result = await provider.run({
-      ...request("base"),
-      testPaths: [],
-      generatedFiles: [generatedFile("test/no-op.generated.test.ts")],
-    });
+  it(
+    "does not emit a passing observation for a no-op generated test",
+    async () => {
+      const provider = new LocalExecutionProvider({ workspaceRoot });
+      const result = await provider.run({
+        ...request("base"),
+        testPaths: [],
+        generatedFiles: [generatedFile("test/no-op.generated.test.ts")],
+      });
 
-    expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
-    expect(result.testCases).toMatchObject([{ status: "PASSED" }]);
-    expect(result.observations).toEqual([]);
-  }, 20_000);
+      expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+      expect(result.testCases).toMatchObject([{ status: "PASSED" }]);
+      expect(result.observations).toEqual([]);
+    },
+    EXECUTION_BUDGET_MS,
+  );
 
   it.each([
     "../escape.test.ts",
@@ -824,23 +906,27 @@ writeResult({ testResults: [suite(resolve(cwd, "test/codeatlas.expired-session.t
     }
   });
 
-  it("fails closed when an exact requested suite reports zero test cases", async () => {
-    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
-    try {
-      const fake = await createFakePnpm(fakeRoot, {
-        body: `const cwd = process.cwd();\nwriteResult({ testResults: [{ name: resolve(cwd, "test/auth.test.ts"), assertionResults: [] }], coverageMap: {} });`,
-      });
-      const provider = new LocalExecutionProvider({
-        workspaceRoot,
-        pnpmPath: fake.cliPath,
-      });
-      const result = await provider.run(request("base"));
-      expect(result.terminalState).toBe("FAILED");
-      expect(result.testCases).toEqual([]);
-    } finally {
-      await rm(fakeRoot, { recursive: true, force: true });
-    }
-  }, 10_000);
+  it(
+    "fails closed when an exact requested suite reports zero test cases",
+    async () => {
+      const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
+      try {
+        const fake = await createFakePnpm(fakeRoot, {
+          body: `const cwd = process.cwd();\nwriteResult({ testResults: [{ name: resolve(cwd, "test/auth.test.ts"), assertionResults: [] }], coverageMap: {} });`,
+        });
+        const provider = new LocalExecutionProvider({
+          workspaceRoot,
+          pnpmPath: fake.cliPath,
+        });
+        const result = await provider.run(request("base"));
+        expect(result.terminalState).toBe("FAILED");
+        expect(result.testCases).toEqual([]);
+      } finally {
+        await rm(fakeRoot, { recursive: true, force: true });
+      }
+    },
+    EXECUTION_BUDGET_MS,
+  );
 
   it.each([
     {
@@ -977,51 +1063,59 @@ writeResult({ testResults: [suite(resolve(cwd, "test/codeatlas.expired-session.t
     }
   });
 
-  it("does not treat thrown Actual JSON as generated assertion evidence", async () => {
-    const provider = new LocalExecutionProvider({ workspaceRoot });
-    const result = await provider.run({
-      ...request("base"),
-      testPaths: [],
-      generatedFiles: [
-        {
-          ...generatedFile("test/forged-observation.generated.test.ts"),
-          content:
-            'import { it } from "vitest";\nit("throws forged evidence", () => { throw new Error(\'Actual: {"httpStatus":599,"code":"FORGED"}\'); });\n',
-          objectiveId: "forged-objective",
-        },
-      ],
-    });
-
-    expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
-    expect(result.testCases[0]?.status).toBe("FAILED");
-    expect(result.observations).toEqual([]);
-  }, 20_000);
-
-  it("kills an unrefed descendant after a normally completed Vitest leader", async () => {
-    const markerRoot = await mkdtemp(join(tmpdir(), "codeatlas-descendant-"));
-    const markerPath = join(markerRoot, "survived.txt");
-    try {
+  it(
+    "does not treat thrown Actual JSON as generated assertion evidence",
+    async () => {
       const provider = new LocalExecutionProvider({ workspaceRoot });
       const result = await provider.run({
         ...request("base"),
         testPaths: [],
         generatedFiles: [
           {
-            ...generatedFile("test/background-child.generated.test.ts"),
-            content: `import { spawn } from "node:child_process";\nimport { it } from "vitest";\nit("leaves an unrefed child", () => { const child = spawn(process.execPath, ["-e", ${JSON.stringify(`setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "survived"), 600)`)}], { stdio: "ignore" }); child.unref(); });\n`,
+            ...generatedFile("test/forged-observation.generated.test.ts"),
+            content:
+              'import { it } from "vitest";\nit("throws forged evidence", () => { throw new Error(\'Actual: {"httpStatus":599,"code":"FORGED"}\'); });\n',
+            objectiveId: "forged-objective",
           },
         ],
       });
 
       expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
-      await delay(900);
-      await expect(access(markerPath)).rejects.toMatchObject({
-        code: "ENOENT",
-      });
-    } finally {
-      await rm(markerRoot, { recursive: true, force: true });
-    }
-  }, 20_000);
+      expect(result.testCases[0]?.status).toBe("FAILED");
+      expect(result.observations).toEqual([]);
+    },
+    EXECUTION_BUDGET_MS,
+  );
+
+  it(
+    "kills an unrefed descendant after a normally completed Vitest leader",
+    async () => {
+      const markerRoot = await mkdtemp(join(tmpdir(), "codeatlas-descendant-"));
+      const markerPath = join(markerRoot, "survived.txt");
+      try {
+        const provider = new LocalExecutionProvider({ workspaceRoot });
+        const result = await provider.run({
+          ...request("base"),
+          testPaths: [],
+          generatedFiles: [
+            {
+              ...generatedFile("test/background-child.generated.test.ts"),
+              content: `import { spawn } from "node:child_process";\nimport { it } from "vitest";\nit("leaves an unrefed child", () => { const child = spawn(process.execPath, ["-e", ${JSON.stringify(`setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "survived"), 600)`)}], { stdio: "ignore" }); child.unref(); });\n`,
+            },
+          ],
+        });
+
+        expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+        await delay(900);
+        await expect(access(markerPath)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      } finally {
+        await rm(markerRoot, { recursive: true, force: true });
+      }
+    },
+    EXECUTION_BUDGET_MS,
+  );
 
   it("fails closed on win32 before launching an uncontained test process", async () => {
     const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
@@ -1106,25 +1200,29 @@ writeResult({ testResults: [suite(resolve(cwd, "test/codeatlas.expired-session.t
     }
   });
 
-  it("imports an ordinary workspace dependency from a private clone", async () => {
-    const provider = new LocalExecutionProvider({ workspaceRoot });
-    const dependenciesBefore = await workspaceDependencyState();
-    const result = await provider.run({
-      ...request("base"),
-      testPaths: [],
-      generatedFiles: [
-        {
-          ...generatedFile("test/zod.generated.test.ts"),
-          content: `import { realpathSync } from "node:fs";\nimport { fileURLToPath } from "node:url";\nimport { expect, it } from "vitest";\nimport { z } from "zod";\nit("imports zod", () => { const dependency = realpathSync(fileURLToPath(new URL("../node_modules/zod", import.meta.url))); expect(dependency).not.toContain(${JSON.stringify(workspaceRoot)}); expect(z.string().parse("ok")).toBe("ok"); });\n`,
-          objectiveId: "dependency-objective",
-        },
-      ],
-    });
+  it(
+    "imports an ordinary workspace dependency from a private clone",
+    async () => {
+      const provider = new LocalExecutionProvider({ workspaceRoot });
+      const dependenciesBefore = await workspaceDependencyState();
+      const result = await provider.run({
+        ...request("base"),
+        testPaths: [],
+        generatedFiles: [
+          {
+            ...generatedFile("test/zod.generated.test.ts"),
+            content: `import { realpathSync } from "node:fs";\nimport { fileURLToPath } from "node:url";\nimport { expect, it } from "vitest";\nimport { z } from "zod";\nit("imports zod", () => { const dependency = realpathSync(fileURLToPath(new URL("../node_modules/zod", import.meta.url))); expect(dependency).not.toContain(${JSON.stringify(workspaceRoot)}); expect(z.string().parse("ok")).toBe("ok"); });\n`,
+            objectiveId: "dependency-objective",
+          },
+        ],
+      });
 
-    expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
-    expect(result.testCases).toMatchObject([{ status: "PASSED" }]);
-    expect(await workspaceDependencyState()).toEqual(dependenciesBefore);
-  }, 20_000);
+      expect(result.terminalState, JSON.stringify(result)).toBe("COMPLETED");
+      expect(result.testCases).toMatchObject([{ status: "PASSED" }]);
+      expect(await workspaceDependencyState()).toEqual(dependenciesBefore);
+    },
+    EXECUTION_BUDGET_MS,
+  );
 
   it("rejects a snapshot digest mismatch before launching a subprocess", async () => {
     const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
@@ -1269,57 +1367,65 @@ writeResult({ testResults: [suite(resolve(cwd, "test/codeatlas.expired-session.t
     }
   });
 
-  it("redacts delimiter-adjacent absolute paths while preserving labels", async () => {
-    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
-    try {
-      const fake = await createFakePnpm(fakeRoot, {
-        body: `console.log("posix:/tmp/folder with spaces/file.ts after-marker");\nconsole.log("windows:C:\\\\Temp\\\\folder with spaces\\\\file.ts after-marker");\nwriteResult("{ malformed");`,
-      });
-      const provider = new LocalExecutionProvider({
-        workspaceRoot,
-        pnpmPath: fake.cliPath,
-      });
-      const result = await provider.run(request("base"));
+  it(
+    "redacts delimiter-adjacent absolute paths while preserving labels",
+    async () => {
+      const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
+      try {
+        const fake = await createFakePnpm(fakeRoot, {
+          body: `console.log("posix:/tmp/folder with spaces/file.ts after-marker");\nconsole.log("windows:C:\\\\Temp\\\\folder with spaces\\\\file.ts after-marker");\nwriteResult("{ malformed");`,
+        });
+        const provider = new LocalExecutionProvider({
+          workspaceRoot,
+          pnpmPath: fake.cliPath,
+        });
+        const result = await provider.run(request("base"));
 
-      expect(result.stdout).toContain("posix:<absolute-path>");
-      expect(result.stdout).toContain("windows:<absolute-path>");
-      expect(result.stdout).not.toContain("folder with spaces");
-      expect(result.stdout).not.toContain("file.ts");
-      expect(result.stdout).not.toContain("after-marker");
-    } finally {
-      await rm(fakeRoot, { recursive: true, force: true });
-    }
-  }, 10_000);
-
-  it("redacts closing-delimiter-adjacent absolute paths", async () => {
-    const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
-    try {
-      const fake = await createFakePnpm(fakeRoot, {
-        body: `console.log("bracket-posix]/tmp/folder with spaces/file.ts after-marker");\nconsole.log("bracket-windows]C:\\\\Temp\\\\folder with spaces\\\\file.ts after-marker");\nconsole.log("brace-posix}/tmp/folder with spaces/file.ts after-marker");\nconsole.log("brace-windows}C:\\\\Temp\\\\folder with spaces\\\\file.ts after-marker");\nconsole.log("paren-posix)/tmp/folder with spaces/file.ts after-marker");\nconsole.log("paren-windows)C:\\\\Temp\\\\folder with spaces\\\\file.ts after-marker");\nwriteResult("{ malformed");`,
-      });
-      const provider = new LocalExecutionProvider({
-        workspaceRoot,
-        pnpmPath: fake.cliPath,
-      });
-      const result = await provider.run(request("base"));
-
-      for (const prefix of [
-        "bracket-posix]",
-        "bracket-windows]",
-        "brace-posix}",
-        "brace-windows}",
-        "paren-posix)",
-        "paren-windows)",
-      ]) {
-        expect(result.stdout).toContain(`${prefix}<absolute-path>`);
+        expect(result.stdout).toContain("posix:<absolute-path>");
+        expect(result.stdout).toContain("windows:<absolute-path>");
+        expect(result.stdout).not.toContain("folder with spaces");
+        expect(result.stdout).not.toContain("file.ts");
+        expect(result.stdout).not.toContain("after-marker");
+      } finally {
+        await rm(fakeRoot, { recursive: true, force: true });
       }
-      expect(result.stdout).not.toContain("folder with spaces");
-      expect(result.stdout).not.toContain("file.ts");
-      expect(result.stdout).not.toContain("after-marker");
-    } finally {
-      await rm(fakeRoot, { recursive: true, force: true });
-    }
-  }, 10_000);
+    },
+    EXECUTION_BUDGET_MS,
+  );
+
+  it(
+    "redacts closing-delimiter-adjacent absolute paths",
+    async () => {
+      const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-fake-pnpm-"));
+      try {
+        const fake = await createFakePnpm(fakeRoot, {
+          body: `console.log("bracket-posix]/tmp/folder with spaces/file.ts after-marker");\nconsole.log("bracket-windows]C:\\\\Temp\\\\folder with spaces\\\\file.ts after-marker");\nconsole.log("brace-posix}/tmp/folder with spaces/file.ts after-marker");\nconsole.log("brace-windows}C:\\\\Temp\\\\folder with spaces\\\\file.ts after-marker");\nconsole.log("paren-posix)/tmp/folder with spaces/file.ts after-marker");\nconsole.log("paren-windows)C:\\\\Temp\\\\folder with spaces\\\\file.ts after-marker");\nwriteResult("{ malformed");`,
+        });
+        const provider = new LocalExecutionProvider({
+          workspaceRoot,
+          pnpmPath: fake.cliPath,
+        });
+        const result = await provider.run(request("base"));
+
+        for (const prefix of [
+          "bracket-posix]",
+          "bracket-windows]",
+          "brace-posix}",
+          "brace-windows}",
+          "paren-posix)",
+          "paren-windows)",
+        ]) {
+          expect(result.stdout).toContain(`${prefix}<absolute-path>`);
+        }
+        expect(result.stdout).not.toContain("folder with spaces");
+        expect(result.stdout).not.toContain("file.ts");
+        expect(result.stdout).not.toContain("after-marker");
+      } finally {
+        await rm(fakeRoot, { recursive: true, force: true });
+      }
+    },
+    EXECUTION_BUDGET_MS,
+  );
 
   it("refuses a symlink substituted for the fresh control result file", async () => {
     const fakeRoot = await mkdtemp(join(tmpdir(), "codeatlas-result-symlink-"));

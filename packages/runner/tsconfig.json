@@ -7,5 +7,5 @@
     "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo"
   },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../analyzer" }]
+  "references": [{ "path": "../analyzer/tsconfig.json" }]
 }

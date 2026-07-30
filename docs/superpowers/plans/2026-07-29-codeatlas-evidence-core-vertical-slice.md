@@ -117,7 +117,7 @@ Root acceptance dependencies added in Task 12 are `@playwright/test@1.62.0` and 
 - Consumes: none.
 - Produces: root commands `pnpm test`, `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, and workspace package discovery under `apps/*`, `packages/*`, and `fixtures/*/*`.
 
-- [ ] **Step 1: Write the failing workspace smoke test**
+- [x] **Step 1: Write the failing workspace smoke test**
 
 ```js
 // scripts/workspace-smoke.test.mjs
@@ -133,13 +133,13 @@ test("workspace pins the production LTS toolchain", async () => {
 });
 ```
 
-- [ ] **Step 2: Run the smoke test and verify it fails**
+- [x] **Step 2: Run the smoke test and verify it fails**
 
 Run: `node --test scripts/workspace-smoke.test.mjs`
 
 Expected: FAIL with `ENOENT` for `package.json` fields that do not yet exist.
 
-- [ ] **Step 3: Create the pinned root configuration**
+- [x] **Step 3: Create the pinned root configuration**
 
 Use this root package contract:
 
@@ -173,7 +173,7 @@ Use this root package contract:
 
 Set `.node-version` to `24.18.0`, `.npmrc` to `engine-strict=true`, and workspace globs to `apps/*`, `packages/*`, and `fixtures/*/*`. Node 24 is the production/CI runtime; the `<27` upper bound lets contributors run the current Node 26 release without weakening the production pin. Configure TypeScript with `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `moduleResolution: NodeNext`, `target: ES2023`, declaration output, and an initially empty root `references` array that each later task extends. Configure Vitest to include `**/test/**/*.test.ts` and exclude fixture test files from the root suite. Configure `.prettierignore` to exclude `.superpowers/`, `.codeatlas/`, `docs/superpowers/`, `.next/`, `coverage/`, `dist/`, and `pnpm-lock.yaml`.
 
-- [ ] **Step 4: Install and verify the toolchain**
+- [x] **Step 4: Install and verify the toolchain**
 
 Run: `corepack pnpm install`
 
@@ -183,7 +183,7 @@ Run: `node --test scripts/workspace-smoke.test.mjs && pnpm format:check`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit the workspace foundation**
+- [x] **Step 5: Commit the workspace foundation**
 
 ```bash
 git add .node-version .npmrc .gitignore .prettierignore package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.json tsconfig.base.json vitest.workspace.ts eslint.config.mjs scripts/workspace-smoke.test.mjs
@@ -207,7 +207,7 @@ git commit -m "build: establish CodeAtlas workspace"
 - Consumes: Node `crypto`; Zod 4.4.3; `json-canonicalize` 2.0.0.
 - Produces: `EvidenceItem`, `GraphNode`, `GraphEdge`, `Finding`, `ProofCard`, `ChangePassport`, `EvidenceManifest`, `signManifest(manifest, privateKey)`, and `verifyManifest(signed, publicKey)`.
 
-- [ ] **Step 1: Write failing schema tests**
+- [x] **Step 1: Write failing schema tests**
 
 ```ts
 import { describe, expect, it } from "vitest";
@@ -242,13 +242,13 @@ describe("evidence provenance", () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests and verify missing exports**
+- [x] **Step 2: Run the tests and verify missing exports**
 
 Run: `pnpm vitest run packages/evidence/test/schema.test.ts`
 
 Expected: FAIL because `EvidenceItemSchema` and `GraphEdgeSchema` do not exist.
 
-- [ ] **Step 3: Implement the domain schemas**
+- [x] **Step 3: Implement the domain schemas**
 
 Define exact enums:
 
@@ -304,7 +304,7 @@ export const SourceLocationSchema = z.object({
 
 Build all exported schemas from these primitives. `ProofCardSchema` must require base behavior, head behavior, evidence ids, affected journey, reproduction command, recommended action, and limitations. `ChangePassportSchema` must require base/head SHAs, engine version, findings, executed tests, unverified areas, retention policy, and manifest digest. `EvidenceManifest.analysisId` is the deterministic idempotency id derived from repository provider, base/head digests, configuration digest, and engine version; per-attempt ids are never included in the signed canonical manifest.
 
-- [ ] **Step 4: Write failing manifest signature tests**
+- [x] **Step 4: Write failing manifest signature tests**
 
 ```ts
 import { generateKeyPairSync } from "node:crypto";
@@ -326,17 +326,17 @@ it("detects a modified signed manifest", () => {
 });
 ```
 
-- [ ] **Step 5: Implement canonical Ed25519 signing**
+- [x] **Step 5: Implement canonical Ed25519 signing**
 
 `signManifest` canonicalizes the validated manifest, hashes it with SHA-256, signs the canonical bytes using Ed25519, and returns `{ manifest, digest, signature }` using base64url for the signature. `verifyManifest` revalidates the schema, recomputes the digest, then verifies the signature with `timingSafeEqual` for digest comparison and `crypto.verify` for the signature.
 
-- [ ] **Step 6: Run package verification**
+- [x] **Step 6: Run package verification**
 
 Run: `pnpm vitest run packages/evidence/test && pnpm typecheck`
 
 Expected: PASS with no TypeScript errors.
 
-- [ ] **Step 7: Commit the evidence model**
+- [x] **Step 7: Commit the evidence model**
 
 ```bash
 git add package.json pnpm-lock.yaml tsconfig.json packages/evidence
@@ -359,7 +359,7 @@ git commit -m "feat: define the evidence model"
 - Consumes: Vitest 4.1.10 from the workspace.
 - Produces: two immutable fixture directory snapshots; both pass the existing valid-session test, while an expired non-refreshable token returns 401 on base and 500 on head. Task 4 derives stable content-addressed snapshot digests from these directories.
 
-- [ ] **Step 1: Write the existing test in both snapshots**
+- [x] **Step 1: Write the existing test in both snapshots**
 
 ```ts
 import { describe, expect, it } from "vitest";
@@ -390,7 +390,7 @@ The base manifest is:
 
 The head manifest is identical except its name is `@codeatlas/fixture-auth-head`.
 
-- [ ] **Step 2: Add the safe base implementation**
+- [x] **Step 2: Add the safe base implementation**
 
 ```ts
 export interface Token {
@@ -424,7 +424,7 @@ export function restoreSession(token: Token, now: number): SessionResponse {
 }
 ```
 
-- [ ] **Step 3: Add the regressed head implementation**
+- [x] **Step 3: Add the regressed head implementation**
 
 The head file is identical except `validateToken` is exactly:
 
@@ -437,13 +437,13 @@ export function validateToken(token: Token, now: number): string {
 }
 ```
 
-- [ ] **Step 4: Verify the existing suite passes on both revisions**
+- [x] **Step 4: Verify the existing suite passes on both revisions**
 
 Run: `pnpm --dir fixtures/auth-regression/base test && pnpm --dir fixtures/auth-regression/head test`
 
 Expected: both commands PASS one existing test. This proves the regression is not exposed by the repository suite.
 
-- [ ] **Step 5: Commit the fixture**
+- [x] **Step 5: Commit the fixture**
 
 ```bash
 git add fixtures/auth-regression pnpm-lock.yaml
@@ -470,7 +470,7 @@ git commit -m "test: add authentication regression fixture"
 - Consumes: graph and source-location schemas from `@codeatlas/evidence`; TypeScript compiler API 5.9.3; `diff` 9.0.0; `fast-glob` 3.3.3.
 - Produces: analyzer-owned `SnapshotAnalysis` and `AnalyzedEdge` types, `computeSnapshotDigest(root: string): Promise<string>`, `analyzeSnapshot(input: { root: string; snapshotSha: string }): Promise<SnapshotAnalysis>`, and `mapChangedSymbols(base, head): ChangedSymbol[]`.
 
-- [ ] **Step 1: Write failing analyzer expectations**
+- [x] **Step 1: Write failing analyzer expectations**
 
 ```ts
 import { expect, it } from "vitest";
@@ -494,13 +494,13 @@ it("maps the authentication change to validateToken and its dependant", async ()
 
 Add a second test that calls `computeSnapshotDigest` twice for base and once for head. Assert both base calls return the same 40-character lowercase hex digest and the head digest differs.
 
-- [ ] **Step 2: Run and verify the missing analyzer failure**
+- [x] **Step 2: Run and verify the missing analyzer failure**
 
 Run: `pnpm vitest run packages/analyzer/test/analyze-snapshot.test.ts`
 
 Expected: FAIL because `analyzeSnapshot` is not exported.
 
-- [ ] **Step 3: Implement safe snapshot traversal**
+- [x] **Step 3: Implement safe snapshot traversal**
 
 Resolve the provided root once with `realpath`, enumerate only `.ts`, `.tsx`, `.js`, and `.jsx` files beneath it, reject symlinks that resolve outside the root, and ignore `node_modules`, build output, and coverage. Create a TypeScript `Program`, then traverse `SourceFile` nodes to emit:
 
@@ -518,17 +518,17 @@ Build stable ids using `sha256(snapshotSha + ":" + path + ":" + kind + ":" + qua
 
 Define `AnalyzedEdge` with exact fields `id`, `from`, `to`, `fromName`, `toName`, `relation`, `evidenceIds`, `evidenceType`, and `snapshotSha`. Define `ChangedSymbol` as `{ id, name, path, baseLocation, headLocation, changedLines, signatureChanged }`. Define `SnapshotAnalysis` with `snapshotSha`, `files`, `symbols`, `edges`, `tests`, `contracts`, `branches`, and `evidence`. These exported types are the inputs used by Tasks 5, 7, and 9.
 
-- [ ] **Step 4: Implement line-diff mapping**
+- [x] **Step 4: Implement line-diff mapping**
 
 Use `diffLines(baseText, headText)` to track old and new line cursors. Record added/removed line spans, then intersect each span with symbol source ranges. A symbol is changed when its body intersects a changed span or its signature digest differs. Sort changed symbols by path and start line for deterministic output.
 
-- [ ] **Step 5: Verify citations and change mapping**
+- [x] **Step 5: Verify citations and change mapping**
 
 Run: `pnpm vitest run packages/analyzer/test && pnpm typecheck`
 
 Expected: PASS; every emitted source location contains the correct fixture SHA and a repository-relative path.
 
-- [ ] **Step 6: Commit the analyzer**
+- [x] **Step 6: Commit the analyzer**
 
 ```bash
 git add package.json pnpm-lock.yaml tsconfig.json packages/analyzer
@@ -549,7 +549,7 @@ git commit -m "feat: map TypeScript snapshots and changes"
 - Consumes: `SnapshotAnalysis`, `ChangedSymbol[]`, and graph edges.
 - Produces: `selectTests(input: TestSelectionInput): TestSelection[]`, where each result has `testId`, `path`, `reasons`, and `evidenceIds`.
 
-- [ ] **Step 1: Write the failing selection test**
+- [x] **Step 1: Write the failing selection test**
 
 ```ts
 import { expect, it } from "vitest";
@@ -573,17 +573,17 @@ it("selects the auth test through the changed symbol call path", () => {
 });
 ```
 
-- [ ] **Step 2: Run and verify the missing selector failure**
+- [x] **Step 2: Run and verify the missing selector failure**
 
 Run: `pnpm vitest run packages/selector/test/select-tests.test.ts`
 
 Expected: FAIL because `selectTests` does not exist.
 
-- [ ] **Step 3: Implement deterministic reverse reachability**
+- [x] **Step 3: Implement deterministic reverse reachability**
 
 Create a reverse adjacency map for `CALLS`, `IMPORTS`, and `TESTS`. Starting from each changed symbol, walk at most eight edges and stop cycles using the shortest visited distance. Select a test when the walk reaches a test node. Reasons use the shortest resolved path and exact symbol names. Deduplicate evidence ids and sort selections by path.
 
-- [ ] **Step 4: Verify selection and exclusion behavior**
+- [x] **Step 4: Verify selection and exclusion behavior**
 
 Add a second unrelated test and assert it is excluded with an inspectable `NO_REACHABLE_CHANGED_SYMBOL` explanation returned by `explainExclusion(testId, input)`.
 
@@ -591,7 +591,7 @@ Run: `pnpm vitest run packages/selector/test && pnpm typecheck`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit the selector**
+- [x] **Step 5: Commit the selector**
 
 ```bash
 git add packages/selector tsconfig.json
@@ -616,7 +616,7 @@ git commit -m "feat: select tests from change impact"
 - Consumes: selected test paths, snapshot root/SHA, optional generated test files, and a resource policy.
 - Produces: `ExecutionProvider.run(request: ExecutionRequest): Promise<ExecutionResult>` with test cases, exit code, duration, sanitized stdout/stderr, coverage locations, environment digest, and terminal state.
 
-- [ ] **Step 1: Define the provider contract and failing test**
+- [x] **Step 1: Define the provider contract and failing test**
 
 ```ts
 export interface ExecutionRequest {
@@ -667,13 +667,13 @@ export interface ExecutionProvider {
 
 The first test runs `test/auth.test.ts` against both fixture roots and expects `terminalState: "COMPLETED"`, one passing case, different snapshot SHAs, and output shorter than the configured cap.
 
-- [ ] **Step 2: Run and verify the missing implementation failure**
+- [x] **Step 2: Run and verify the missing implementation failure**
 
 Run: `pnpm vitest run packages/runner/test/local-execution-provider.test.ts`
 
 Expected: FAIL because `LocalExecutionProvider` does not exist.
 
-- [ ] **Step 3: Implement the local provider without shell interpolation**
+- [x] **Step 3: Implement the local provider without shell interpolation**
 
 For each request:
 
@@ -715,17 +715,17 @@ await execa(pnpmPath, [
 
 Always delete the temporary directory in `finally`. Redact absolute workspace paths and environment-shaped secrets from returned logs. Hash Node version, pnpm version, lockfile digest, and runner version into `environmentDigest`. Generated observations are authoritative only for the narrow template's single structured object assertion, which binds HTTP status and response code atomically. For passing assertions, use the declared expected object; for failures, parse Vitest's serialized `toEqual` expected and actual objects. If either object cannot be validated, omit the observation and force the later finding to `UNVERIFIED`.
 
-- [ ] **Step 4: Add timeout and output-cap tests**
+- [x] **Step 4: Add timeout and output-cap tests**
 
 Use synthetic fixture tests to exceed 50 ms and 1 KiB. Assert terminal states `TIMED_OUT` and `OUTPUT_LIMIT`, no retry, sanitized output, and temporary-directory cleanup.
 
-- [ ] **Step 5: Run runner verification**
+- [x] **Step 5: Run runner verification**
 
 Run: `pnpm vitest run packages/runner/test && pnpm typecheck`
 
 Expected: PASS; fixture existing tests pass on both revisions.
 
-- [ ] **Step 6: Commit the execution provider**
+- [x] **Step 6: Commit the execution provider**
 
 ```bash
 git add package.json pnpm-lock.yaml tsconfig.json packages/runner
@@ -747,7 +747,7 @@ git commit -m "feat: execute bounded local test runs"
 - Consumes: changed symbol locations, branch locations, base coverage, public function contracts, and selected-test evidence.
 - Produces: `deriveTestObjectives(input): TestObjective[]` and `TestGenerator.generate(objective): Promise<GeneratedTest>`.
 
-- [ ] **Step 1: Write the failing objective test**
+- [x] **Step 1: Write the failing objective test**
 
 ```ts
 import { expect, it } from "vitest";
@@ -769,17 +769,17 @@ it("targets the uncovered changed expiration branch", () => {
 });
 ```
 
-- [ ] **Step 2: Run and verify the missing generator failure**
+- [x] **Step 2: Run and verify the missing generator failure**
 
 Run: `pnpm vitest run packages/generator/test/generator.test.ts`
 
 Expected: FAIL because `deriveTestObjectives` is missing.
 
-- [ ] **Step 3: Implement deterministic objective derivation**
+- [x] **Step 3: Implement deterministic objective derivation**
 
 Intersect changed lines with branch locations, subtract covered lines, and create one objective per uncovered changed branch. Objectives contain evidence ids and source locations; generator output cannot alter the objective or evidence list.
 
-- [ ] **Step 4: Implement the narrow template generator**
+- [x] **Step 4: Implement the narrow template generator**
 
 Define the generator contract:
 
@@ -821,7 +821,7 @@ describe("generated: expired session regression", () => {
 
 Return metadata `{ generated: true, executed: false, path: "test/codeatlas.expired-session.test.ts", objectiveId, evidenceIds, expectedBehavior: { httpStatus: 401, code: "SESSION_EXPIRED" } }`. For unsupported objective shapes, return a typed `UNSUPPORTED_OBJECTIVE` result rather than speculative code.
 
-- [ ] **Step 5: Execute the generated test on both revisions**
+- [x] **Step 5: Execute the generated test on both revisions**
 
 Use `LocalExecutionProvider` in the package test. Assert compilation and PASS on base, FAIL on head, head actual status 500, and that both execution results retain the generated label and objective id.
 
@@ -829,7 +829,7 @@ Run: `pnpm vitest run packages/generator/test && pnpm typecheck`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit objective generation**
+- [x] **Step 6: Commit objective generation**
 
 ```bash
 git add packages/generator tsconfig.json
@@ -850,7 +850,7 @@ git commit -m "feat: generate evidence-targeted regression tests"
 - Consumes: base/head `ExecutionResult`, test objectives, changed symbols, graph paths, and evidence items.
 - Produces: `compareRuns(input: ComparisonInput): Finding[]` with evidence eligibility and qualitative confidence factors.
 
-- [ ] **Step 1: Write the failing differential test**
+- [x] **Step 1: Write the failing differential test**
 
 ```ts
 import { expect, it } from "vitest";
@@ -879,13 +879,13 @@ it("confirms the repeatable 401 to 500 regression", () => {
 });
 ```
 
-- [ ] **Step 2: Run and verify the missing comparison failure**
+- [x] **Step 2: Run and verify the missing comparison failure**
 
 Run: `pnpm vitest run packages/differential/test/compare-runs.test.ts`
 
 Expected: FAIL because `compareRuns` does not exist.
 
-- [ ] **Step 3: Implement evidence eligibility rules**
+- [x] **Step 3: Implement evidence eligibility rules**
 
 Create a confirmed regression only when:
 
@@ -898,11 +898,11 @@ Create a confirmed regression only when:
 
 Otherwise return `CONFIRMED_CHANGE`, `PROBABLE_IMPACT`, or `UNVERIFIED` with a limitation explaining the failed eligibility rule. Calculate qualitative confidence from factors; never accept a model-provided percentage.
 
-- [ ] **Step 4: Build the exact Proof Card fields**
+- [x] **Step 4: Build the exact Proof Card fields**
 
 Map the fixture finding to journey `Returning user → Restore session → Validate expired token`, graph path `restoreSession → validateToken`, reproduction command `codeatlas replay <finding-id>`, recommended action `Restore the unconditional expiration guard or accept the changed behavior with a contract update`, and an empty limitations array only when every confirmation gate passes.
 
-- [ ] **Step 5: Verify partial and mismatch cases**
+- [x] **Step 5: Verify partial and mismatch cases**
 
 Add tests for environment mismatch, head timeout, one flaky repeat, and unexecuted generated test. Expected state for each is `UNVERIFIED`, never `CONFIRMED_REGRESSION`.
 
@@ -910,7 +910,7 @@ Run: `pnpm vitest run packages/differential/test && pnpm typecheck`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit differential findings**
+- [x] **Step 6: Commit differential findings**
 
 ```bash
 git add packages/differential tsconfig.json
@@ -973,15 +973,15 @@ export interface AnalysisOutput {
 }
 ```
 
-- [ ] **Step 1: Write the failing Passport test**
+- [x] **Step 1: Write the failing Passport test**
 
 Assert a Passport cannot be built without base/head SHAs, engine version, executed-test counts, unverified areas, retention policy, and a manifest digest. Assert the fixture Passport state is `ACTION_REQUIRED`, contains one confirmed regression, one generated test executed on both revisions, and exact replay command.
 
-- [ ] **Step 2: Implement Passport assembly**
+- [x] **Step 2: Implement Passport assembly**
 
 `buildPassport` derives summary counts from validated findings and runs. It never accepts caller-provided summary totals. Sort files, symbols, tests, findings, and evidence ids deterministically. Export JSON and Markdown from the same validated object.
 
-- [ ] **Step 3: Write the failing pipeline test**
+- [x] **Step 3: Write the failing pipeline test**
 
 ```ts
 it("runs the complete authentication proof workflow", async () => {
@@ -995,13 +995,13 @@ it("runs the complete authentication proof workflow", async () => {
 });
 ```
 
-- [ ] **Step 4: Implement the orchestration sequence**
+- [x] **Step 4: Implement the orchestration sequence**
 
 Compute content snapshot digests, run analyzer on base/head, map changes, select existing tests, execute selected tests once for coverage, derive and generate objectives, execute the combined existing/generated set three times on both revisions, compare results, store content-addressed artifacts, build the Passport and manifest, then write a reproduction bundle. Derive the canonical analysis id from provider `local`, both snapshot digests, configuration digest, and engine version. The local artifact path is `.codeatlas/runs/<analysis-id>/` and writes use a temporary file plus atomic rename. Add `.codeatlas/` to `.gitignore` before the first pipeline test writes artifacts.
 
 `AnalyzeComparisonRequest` accepts `executionProvider`, `artifactStore`, `testGenerator`, `clock`, and `signingKey` dependencies so tests remain deterministic and the later GKE provider can replace local execution.
 
-- [ ] **Step 5: Verify deterministic reruns**
+- [x] **Step 5: Verify deterministic reruns**
 
 Run the pipeline twice with the same inputs and fixed clock. Assert identical manifest digests and different analysis attempt ids only outside the canonical manifest.
 
@@ -1009,7 +1009,7 @@ Run: `pnpm vitest run packages/passport/test packages/pipeline/test && pnpm type
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit the Passport pipeline**
+- [x] **Step 6: Commit the Passport pipeline**
 
 ```bash
 git add .gitignore packages/passport packages/pipeline tsconfig.json
@@ -1032,25 +1032,25 @@ git commit -m "feat: build signed Change Passports"
 - Consumes: `analyzeComparison`, signed manifests, reproduction bundles, and local execution provider.
 - Produces: executable `codeatlas`, `codeatlas analyze --base <path> --head <path> --out <path>`, and `codeatlas replay <bundle-path>`.
 
-- [ ] **Step 1: Write a failing CLI analyze test**
+- [x] **Step 1: Write a failing CLI analyze test**
 
 Invoke the CLI through Execa with the two fixture paths and a temporary output directory. Expect exit code `2` for `ACTION_REQUIRED`, stdout containing `Expired sessions return an internal error`, and files `passport.json`, `passport.md`, `evidence-manifest.json`, `evidence-manifest.sig`, and `reproduction-bundle.json`.
 
-- [ ] **Step 2: Implement validated CLI arguments and exit codes**
+- [x] **Step 2: Implement validated CLI arguments and exit codes**
 
 Use Commander 15.0.0. Resolve paths, reject nonexistent or identical base/head roots, reject output paths inside either snapshot, and use no shell. Exit codes are `0 VERIFIED`, `2 ACTION_REQUIRED`, `3 PARTIAL`, `4 ANALYSIS_FAILED`, and `5 SECURITY_POLICY`. Human output and `--json` output derive from the same result.
 
-- [ ] **Step 3: Write the failing replay test**
+- [x] **Step 3: Write the failing replay test**
 
 Replay the generated fixture bundle. Expect signature verification before execution, then exact final line `REPRODUCED finding_expired_session`. Modify one artifact digest and expect exit code `5` with `Bundle integrity verification failed`; no test process may start.
 
-- [ ] **Step 4: Implement local replay**
+- [x] **Step 4: Implement local replay**
 
 Validate bundle schema, verify manifest signature/digests, confirm fixture base/head paths remain within the explicitly supplied workspace root, rerun the recorded generated test under the recorded runner policy, compare sanitized results, and print one of `REPRODUCED`, `NOT_REPRODUCED`, or `ENVIRONMENT_MISMATCH`.
 
 This local-fixture source adapter is intentionally replaced by GitHub SHA fetching in the later GitHub production plan; the integrity and execution sequence stay unchanged.
 
-- [ ] **Step 5: Verify CLI behavior**
+- [x] **Step 5: Verify CLI behavior**
 
 Run: `pnpm vitest run apps/cli/test && pnpm typecheck`
 
@@ -1068,7 +1068,7 @@ pnpm --filter @codeatlas/cli codeatlas replay .codeatlas/demo/reproduction-bundl
 
 Expected: first command reports `ACTION_REQUIRED`; second ends with `REPRODUCED finding_expired_session`.
 
-- [ ] **Step 6: Commit the CLI**
+- [x] **Step 6: Commit the CLI**
 
 ```bash
 git add apps/cli package.json tsconfig.json
@@ -1100,15 +1100,15 @@ git commit -m "feat: add CodeAtlas analyze and replay CLI"
 - Consumes: `AnalysisOutput` from `@codeatlas/pipeline`; `ProofCard` and `ChangePassport` from `@codeatlas/evidence`.
 - Produces: local demo route `POST /api/demo`, repository-state landing page, and real-data workspace `/demo/pr/284`.
 
-- [ ] **Step 1: Write failing component hierarchy tests**
+- [x] **Step 1: Write failing component hierarchy tests**
 
 Render the workspace with the real pipeline fixture output. Assert accessible text `Action required`, `Authentication impact`, `Expired sessions return an internal error`, `HTTP 401 with SESSION_EXPIRED`, `HTTP 500 with INTERNAL_ERROR`, and `codeatlas replay`. Assert a `View impact as list` control exposes the same nodes and evidence states without SVG.
 
-- [ ] **Step 2: Create the visual token system**
+- [x] **Step 2: Create the visual token system**
 
 Define CSS custom properties for every approved color, self-hosted font declarations for Familjen Grotesk, IBM Plex Sans, and IBM Plex Mono, spacing in a 4 px scale, 6–10 px radii, and focus outlines using Route Cobalt plus a 2 px offset. Do not use gradients, backdrop filters, or global animation.
 
-- [ ] **Step 3: Build the product surfaces**
+- [x] **Step 3: Build the product surfaces**
 
 The landing page begins with current repository verification state, not a generic dashboard. The workspace uses:
 
@@ -1122,21 +1122,21 @@ The landing page begins with current repository verification state, not a generi
 
 Use a custom accessible SVG rather than a stock graph theme. Nodes are buttons with `aria-label` including entity, evidence state, and affected path. The list alternative is always available.
 
-- [ ] **Step 4: Connect the real demo analysis**
+- [x] **Step 4: Connect the real demo analysis**
 
 `POST /api/demo` is enabled only when `CODEATLAS_DEMO_MODE=true`. It starts `analyzeComparison` using the fixture paths, stores the terminal `AnalysisOutput` in a process-local demo store, and returns the analysis id. The client navigates to `/demo/pr/284`; the page reads the stored output and never imports a hard-coded Passport. If no analysis exists, show a `Run verified demo` action rather than fabricated results.
 
-- [ ] **Step 5: Add purposeful and reduced motion**
+- [x] **Step 5: Add purposeful and reduced motion**
 
 On first result display, changed nodes appear, dependency edges reveal, runtime edges become solid, and the Proof Card opens. Total duration is under 900 ms, runs once, and is disabled by `prefers-reduced-motion`. No element loops.
 
-- [ ] **Step 6: Verify UI tests and production build**
+- [x] **Step 6: Verify UI tests and production build**
 
 Run: `pnpm vitest run apps/web/test && pnpm --filter @codeatlas/web build`
 
 Expected: PASS and a successful Next.js 15.2.9 build under Node 24.
 
-- [ ] **Step 7: Commit the workspace**
+- [x] **Step 7: Commit the workspace**
 
 ```bash
 git add apps/web package.json pnpm-lock.yaml tsconfig.json
@@ -1160,11 +1160,11 @@ git commit -m "feat: render the CodeAtlas evidence workspace"
 - Consumes: complete local vertical slice.
 - Produces: `pnpm verify`, reproducible contributor setup, manifest documentation, and an acceptance record for the next hosted plan.
 
-- [ ] **Step 1: Write the failing CLI acceptance test**
+- [x] **Step 1: Write the failing CLI acceptance test**
 
 The test runs analyze, asserts `ACTION_REQUIRED`, verifies the manifest signature through the public API, runs replay, and asserts `REPRODUCED finding_expired_session`. It also asserts generated-test metadata says why it was generated, compiled, passed on base, failed on head, and is suitable for permanent inclusion.
 
-- [ ] **Step 2: Write the failing browser acceptance test**
+- [x] **Step 2: Write the failing browser acceptance test**
 
 ```ts
 import { expect, test } from "@playwright/test";
@@ -1181,11 +1181,11 @@ test("shows the complete authentication proof", async ({ page }) => {
 });
 ```
 
-- [ ] **Step 3: Add accessibility and tamper cases**
+- [x] **Step 3: Add accessibility and tamper cases**
 
 Run Axe on the landing and workspace pages with no serious or critical violations. Test keyboard navigation into the map/list and Proof Card. Tamper with the manifest and assert the UI refuses to render it as verified evidence.
 
-- [ ] **Step 4: Document exact contributor workflows**
+- [x] **Step 4: Document exact contributor workflows**
 
 README commands are:
 
@@ -1198,7 +1198,7 @@ CODEATLAS_DEMO_MODE=true pnpm --filter @codeatlas/web dev
 
 Document the local boundary honestly: it isolates filesystem writes in a temporary directory and bounds processes, but it is not a security boundary for hostile repositories. Only the later GKE gVisor provider may be used for third-party hosted execution.
 
-- [ ] **Step 5: Add the one-command verification script**
+- [x] **Step 5: Add the one-command verification script**
 
 Set root `verify` to:
 
@@ -1208,17 +1208,17 @@ Set root `verify` to:
 
 Set `test:e2e` to start the web app in demo mode through Playwright's `webServer` configuration and run both acceptance files.
 
-- [ ] **Step 6: Run final verification**
+- [x] **Step 6: Run final verification**
 
 Run: `pnpm verify`
 
 Expected: formatting, lint, types, unit/integration tests, CLI replay acceptance, browser accessibility, and production build all PASS.
 
-- [ ] **Step 7: Inspect the result manually**
+- [x] **Step 7: Inspect the result manually**
 
 Start the web app, run the verification, inspect desktop at 1440 px and mobile at 390 px, enable reduced motion, use keyboard-only navigation, and run replay from the displayed command. Record any defect as a failing test before fixing it.
 
-- [ ] **Step 8: Commit the verified vertical slice**
+- [x] **Step 8: Commit the verified vertical slice**
 
 ```bash
 git add README.md package.json .gitignore playwright.config.ts test docs/architecture docs/security docs/evidence-manifest-v1.md

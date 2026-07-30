@@ -47,6 +47,13 @@ import {
 } from "../src/index.js";
 import * as PipelineModule from "../src/index.js";
 
+/**
+ * The genuine end-to-end case runs both fixture suites three times on each
+ * revision through real child processes. The budget bounds behaviour, not
+ * latency, so it stays well above the observed cost under a loaded machine.
+ */
+const FULL_PIPELINE_BUDGET_MS = 600_000;
+
 const workspaceRoot = resolve(import.meta.dirname, "../../..");
 const baseRoot = resolve(workspaceRoot, "fixtures/auth-regression/base");
 const headRoot = resolve(workspaceRoot, "fixtures/auth-regression/head");
@@ -732,52 +739,58 @@ describe("LocalArtifactStore", () => {
   });
 });
 
-it("completes once with the genuine local provider and authentication fixture", async () => {
-  const artifactRoot = await mkdtemp(join(tmpdir(), "codeatlas-pipeline-e2e-"));
-  try {
-    const baseSha = await computeSnapshotDigest(baseRoot);
-    const headSha = await computeSnapshotDigest(headRoot);
-    const { deriveAnalysisId } = await import("../../evidence/src/index.js");
-    const analysisId = deriveAnalysisId({
-      provider: "local",
-      baseSha,
-      headSha,
-      configurationDigest,
-      engineVersion: "0.1.0",
-    });
-    const { privateKey } = generateKeyPairSync("ed25519");
-    const output = await analyzeComparison({
-      baseRoot,
-      headRoot,
-      engineVersion: "0.1.0",
-      configurationDigest,
-      executionProvider: new LocalExecutionProvider({ workspaceRoot }),
-      artifactStore: new LocalArtifactStore({
-        repositoryRoot: artifactRoot,
-        analysisId,
-      }),
-      testGenerator: new TemplateTestGenerator(),
-      clock: { now: () => fixedTime },
-      signingKey: privateKey,
-    });
-
-    expect(output.findings[0]?.state).toBe("CONFIRMED_REGRESSION");
-    expect(output.runs).toHaveLength(7);
-    expect(
-      output.runs.every(({ terminalState }) => terminalState === "COMPLETED"),
-    ).toBe(true);
-    expect(
-      output.reproductionBundle.artifacts.every(
-        ({ path }) => !path.startsWith("/"),
-      ),
-    ).toBe(true);
-    expect(JSON.stringify(output.reproductionBundle)).not.toContain(
-      workspaceRoot,
+it(
+  "completes once with the genuine local provider and authentication fixture",
+  async () => {
+    const artifactRoot = await mkdtemp(
+      join(tmpdir(), "codeatlas-pipeline-e2e-"),
     );
-  } finally {
-    await rm(artifactRoot, { recursive: true, force: true });
-  }
-}, 180_000);
+    try {
+      const baseSha = await computeSnapshotDigest(baseRoot);
+      const headSha = await computeSnapshotDigest(headRoot);
+      const { deriveAnalysisId } = await import("../../evidence/src/index.js");
+      const analysisId = deriveAnalysisId({
+        provider: "local",
+        baseSha,
+        headSha,
+        configurationDigest,
+        engineVersion: "0.1.0",
+      });
+      const { privateKey } = generateKeyPairSync("ed25519");
+      const output = await analyzeComparison({
+        baseRoot,
+        headRoot,
+        engineVersion: "0.1.0",
+        configurationDigest,
+        executionProvider: new LocalExecutionProvider({ workspaceRoot }),
+        artifactStore: new LocalArtifactStore({
+          repositoryRoot: artifactRoot,
+          analysisId,
+        }),
+        testGenerator: new TemplateTestGenerator(),
+        clock: { now: () => fixedTime },
+        signingKey: privateKey,
+      });
+
+      expect(output.findings[0]?.state).toBe("CONFIRMED_REGRESSION");
+      expect(output.runs).toHaveLength(7);
+      expect(
+        output.runs.every(({ terminalState }) => terminalState === "COMPLETED"),
+      ).toBe(true);
+      expect(
+        output.reproductionBundle.artifacts.every(
+          ({ path }) => !path.startsWith("/"),
+        ),
+      ).toBe(true);
+      expect(JSON.stringify(output.reproductionBundle)).not.toContain(
+        workspaceRoot,
+      );
+    } finally {
+      await rm(artifactRoot, { recursive: true, force: true });
+    }
+  },
+  FULL_PIPELINE_BUDGET_MS,
+);
 
 function fixtureRequest(
   overrides: Partial<AnalyzeComparisonRequest> = {},

@@ -8,11 +8,11 @@
   },
   "include": ["src/**/*.ts"],
   "references": [
-    { "path": "../../packages/analyzer" },
-    { "path": "../../packages/evidence" },
-    { "path": "../../packages/generator" },
-    { "path": "../../packages/passport" },
-    { "path": "../../packages/pipeline" },
-    { "path": "../../packages/runner" }
+    { "path": "../../packages/analyzer/tsconfig.json" },
+    { "path": "../../packages/evidence/tsconfig.json" },
+    { "path": "../../packages/generator/tsconfig.json" },
+    { "path": "../../packages/passport/tsconfig.json" },
+    { "path": "../../packages/pipeline/tsconfig.json" },
+    { "path": "../../packages/runner/tsconfig.json" }
   ]
 }
