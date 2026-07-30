@@ -10,3 +10,6 @@ coverage/
 dist/
 *.log
 .DS_Store
+
+# Local editor and preview launch configuration.
+.claude/

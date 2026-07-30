@@ -1,0 +1,768 @@
+/*
+ * Forensic Cartography tokens.
+ *
+ * Calm paper surfaces hold navigation and decisions. Technical depth is
+ * concentrated in the deep marine Evidence Map. Status is never carried by
+ * colour alone: every signal is paired with text and a shape or line
+ * treatment.
+ */
+
+:root {
+  /* Approved palette. */
+  --survey-paper: #eef2f1;
+  --field-white: #f8faf9;
+  --atlas-ink: #102832;
+  --route-cobalt: #2368d7;
+  --observed-teal: #55d5aa;
+  --fault-red: #ae3a31;
+  --contour-slate: #6f8a90;
+
+  /* Roles derived from the palette. Text roles are chosen for contrast. */
+  --surface: var(--survey-paper);
+  --surface-raised: var(--field-white);
+  --ink: var(--atlas-ink);
+  --ink-secondary: #33505c;
+  --ink-on-dark: #dce8ec;
+  --ink-on-dark-muted: #9db2ba;
+  --hairline: #d3dedc;
+  --hairline-strong: #b9c9c7;
+
+  /* 4px spacing scale. */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+
+  --radius-s: 6px;
+  --radius-m: 8px;
+  --radius-l: 10px;
+
+  --rail-width: 148px;
+  --proof-card-width: 320px;
+
+  --font-display:
+    var(--font-familjen-grotesk), "Familjen Grotesk", "Segoe UI", system-ui,
+    sans-serif;
+  --font-body:
+    var(--font-ibm-plex-sans), "IBM Plex Sans", "Segoe UI", system-ui,
+    sans-serif;
+  --font-mono:
+    var(--font-ibm-plex-mono), "IBM Plex Mono", ui-monospace, "SFMono-Regular",
+    monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+h1 {
+  font-size: 1.6rem;
+}
+
+h2 {
+  font-size: 1.15rem;
+}
+
+h3 {
+  font-size: 1rem;
+}
+
+p {
+  margin: 0;
+}
+
+code,
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+
+a {
+  color: var(--route-cobalt);
+}
+
+:focus-visible {
+  outline: 2px solid var(--route-cobalt);
+  outline-offset: 2px;
+  border-radius: var(--radius-s);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------- Shared surfaces ---------- */
+
+.panel {
+  background: var(--surface-raised);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-l);
+  padding: var(--space-5);
+}
+
+.action {
+  background: var(--route-cobalt);
+  color: #ffffff;
+  border: 1px solid transparent;
+  border-radius: var(--radius-m);
+  padding: var(--space-3) var(--space-5);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.action:hover:not(:disabled) {
+  background: #1c56b4;
+}
+
+.action:disabled {
+  background: var(--contour-slate);
+  cursor: progress;
+}
+
+.action-quiet {
+  background: var(--surface-raised);
+  color: var(--ink);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-m);
+  padding: var(--space-2) var(--space-4);
+  cursor: pointer;
+}
+
+.action-quiet:hover {
+  border-color: var(--route-cobalt);
+}
+
+.label {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-secondary);
+}
+
+.sha {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--ink-secondary);
+  word-break: break-all;
+}
+
+/* ---------- Landing ---------- */
+
+.landing {
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: var(--space-7) var(--space-5);
+  display: grid;
+  gap: var(--space-5);
+}
+
+.landing-header {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.state-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.landing-grid {
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+}
+
+.promise {
+  color: var(--ink-secondary);
+  max-width: 46rem;
+}
+
+.error-note {
+  border-left: 3px solid var(--fault-red);
+  padding-left: var(--space-3);
+  color: var(--fault-red);
+}
+
+/* ---------- Workspace shell ---------- */
+
+.workspace {
+  display: grid;
+  grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.rail {
+  background: var(--surface-raised);
+  border-right: 1px solid var(--hairline);
+  padding: var(--space-5) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.rail-brand {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.rail-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.rail-link {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-s);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+  color: var(--ink-secondary);
+}
+
+.rail-link[aria-current="true"] {
+  background: var(--survey-paper);
+  border-color: var(--hairline-strong);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.workspace-main {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+}
+
+.workspace-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--proof-card-width);
+  gap: var(--space-5);
+  padding: var(--space-5);
+  align-items: start;
+}
+
+/* ---------- Passport bar ---------- */
+
+.passport-bar {
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface-raised);
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  gap: var(--space-5);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.passport-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 600;
+  border: 1px solid;
+  border-radius: var(--radius-m);
+  padding: var(--space-1) var(--space-3);
+}
+
+.passport-state[data-state="ACTION_REQUIRED"] {
+  color: var(--fault-red);
+  border-color: var(--fault-red);
+  background: #f7eceb;
+}
+
+.passport-state[data-state="VERIFIED"] {
+  color: #1c6a52;
+  border-color: #1c6a52;
+  background: #e9f6f1;
+}
+
+.passport-state[data-state="INCOMPLETE"] {
+  color: var(--ink-secondary);
+  border-color: var(--hairline-strong);
+  background: var(--survey-paper);
+}
+
+.passport-counts {
+  display: flex;
+  gap: var(--space-5);
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+.passport-counts div {
+  display: grid;
+  gap: 2px;
+}
+
+.passport-counts dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+}
+
+/* ---------- Evidence map ---------- */
+
+.map-region {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.map-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.map-canvas {
+  position: relative;
+  background: var(--atlas-ink);
+  border-radius: var(--radius-l);
+  color: var(--ink-on-dark);
+  overflow-x: auto;
+}
+
+.map-figure {
+  position: relative;
+  width: 100%;
+  min-width: 520px;
+  height: 340px;
+}
+
+.map-figure svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.map-node {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: grid;
+  gap: 2px;
+  justify-items: center;
+  background: none;
+  border: 0;
+  padding: var(--space-1);
+  cursor: pointer;
+  color: var(--ink-on-dark);
+  width: max-content;
+  max-width: 12rem;
+}
+
+.map-node-mark {
+  width: 18px;
+  height: 18px;
+  border: 2px solid;
+  display: block;
+}
+
+.map-node[data-state="CHANGED"] .map-node-mark {
+  border-color: var(--route-cobalt);
+  background: #16406e;
+  border-radius: 3px;
+}
+
+.map-node[data-state="OBSERVED"] .map-node-mark {
+  border-color: var(--observed-teal);
+  background: #12463b;
+  border-radius: 50%;
+}
+
+.map-node[data-state="FAILED"] .map-node-mark {
+  border-width: 0;
+  background: var(--fault-red);
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+
+.map-node[data-state="INFERRED"] .map-node-mark,
+.map-node[data-state="UNCHANGED"] .map-node-mark {
+  border-color: var(--contour-slate);
+  border-style: dashed;
+  background: transparent;
+  transform: rotate(45deg);
+}
+
+/* The legend reuses the node marks so shape and colour stay in one place. */
+.map-node-mark[data-legend="CHANGED"] {
+  border-color: var(--route-cobalt);
+  background: #16406e;
+  border-radius: 3px;
+}
+
+.map-node-mark[data-legend="OBSERVED"] {
+  border-color: var(--observed-teal);
+  background: #12463b;
+  border-radius: 50%;
+}
+
+.map-node-mark[data-legend="FAILED"] {
+  border-width: 0;
+  background: var(--fault-red);
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+
+.map-node-mark[data-legend="INFERRED"] {
+  border-color: var(--contour-slate);
+  border-style: dashed;
+  background: transparent;
+  transform: rotate(45deg);
+}
+
+/*
+ * Edges are drawn between node centres, so labels sit on top of lines. A
+ * matching backdrop keeps them legible without hiding the route beneath.
+ */
+.map-node-label,
+.map-node-state {
+  background: var(--atlas-ink);
+  border-radius: var(--radius-s);
+  padding: 0 var(--space-1);
+}
+
+.map-node-label {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.map-node-state {
+  font-size: 0.68rem;
+  color: var(--ink-on-dark-muted);
+  text-transform: lowercase;
+}
+
+.map-node[aria-pressed="true"] .map-node-label {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.map-legend {
+  list-style: none;
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  gap: var(--space-5);
+  flex-wrap: wrap;
+  border-top: 1px solid #23414d;
+  font-size: 0.78rem;
+  color: var(--ink-on-dark-muted);
+}
+
+.map-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* ---------- List alternative ---------- */
+
+.impact-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.impact-list li {
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-m);
+  background: var(--surface-raised);
+  padding: var(--space-3) var(--space-4);
+  display: grid;
+  gap: var(--space-1);
+}
+
+.impact-entry-head {
+  display: flex;
+  gap: var(--space-3);
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.impact-entry-name {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.state-tag {
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-s);
+  padding: 0 var(--space-2);
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+}
+
+.state-tag[data-state="CHANGED"] {
+  border-color: var(--route-cobalt);
+  color: var(--route-cobalt);
+}
+
+.state-tag[data-state="FAILED"] {
+  border-color: var(--fault-red);
+  color: var(--fault-red);
+}
+
+.state-tag[data-state="OBSERVED"] {
+  border-color: #1c6a52;
+  color: #1c6a52;
+}
+
+.state-tag[data-state="INFERRED"],
+.state-tag[data-state="UNCHANGED"] {
+  border-style: dashed;
+  color: var(--ink-secondary);
+}
+
+.edge-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.edge-list li {
+  display: grid;
+  gap: 2px;
+  border-left: 3px solid var(--contour-slate);
+  padding-left: var(--space-3);
+}
+
+.edge-list li[data-observed="true"] {
+  border-left-style: solid;
+  border-left-color: #1c6a52;
+}
+
+.edge-list li[data-observed="false"] {
+  border-left-style: dotted;
+}
+
+/* ---------- Proof card ---------- */
+
+.proof-card {
+  position: sticky;
+  top: var(--space-5);
+  display: grid;
+  gap: var(--space-4);
+}
+
+.behavior-pair {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.behavior-pair div {
+  border: 1px solid var(--hairline);
+  border-left-width: 3px;
+  border-radius: var(--radius-s);
+  padding: var(--space-2) var(--space-3);
+}
+
+.behavior-pair div[data-revision="base"] {
+  border-left-color: #1c6a52;
+}
+
+.behavior-pair div[data-revision="head"] {
+  border-left-color: var(--fault-red);
+}
+
+.behavior-pair dt {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-secondary);
+}
+
+.behavior-pair dd {
+  margin: 0;
+  font-family: var(--font-mono);
+}
+
+.replay-command {
+  display: block;
+  background: var(--atlas-ink);
+  color: var(--ink-on-dark);
+  border-radius: var(--radius-s);
+  padding: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  overflow-x: auto;
+}
+
+.factor-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.factor-list li {
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-s);
+  padding: 0 var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+
+.limitations {
+  margin: 0;
+  padding-left: var(--space-4);
+  color: var(--ink-secondary);
+}
+
+.integrity-note {
+  color: var(--ink-secondary);
+  font-size: 0.85rem;
+}
+
+/* ---------- Purposeful reveal ---------- */
+
+/*
+ * One short, non-looping reveal that explains the analysis: the change appears,
+ * its dependants follow, then runtime-confirmed edges resolve. Total duration
+ * stays under 900ms and the whole sequence is removed under reduced motion.
+ */
+@media (prefers-reduced-motion: no-preference) {
+  .reveal-band-0 {
+    animation: atlas-appear 220ms ease-out both;
+  }
+
+  .reveal-band-1 {
+    animation: atlas-appear 220ms ease-out 200ms both;
+  }
+
+  .reveal-band-2 {
+    animation: atlas-appear 220ms ease-out 400ms both;
+  }
+
+  .reveal-edge {
+    animation: atlas-resolve 260ms ease-out 560ms both;
+  }
+
+  .reveal-card {
+    animation: atlas-appear 240ms ease-out 620ms both;
+  }
+}
+
+@keyframes atlas-appear {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 6px));
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%);
+  }
+}
+
+@keyframes atlas-resolve {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* The Proof Card is a document, not a positioned node. */
+.reveal-card {
+  animation-name: atlas-fade;
+}
+
+@keyframes atlas-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 60rem) {
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .rail {
+    border-right: 0;
+    border-bottom: 1px solid var(--hairline);
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-4);
+    overflow-x: auto;
+  }
+
+  .rail-list {
+    grid-auto-flow: column;
+    gap: var(--space-2);
+  }
+
+  .workspace-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .proof-card {
+    position: static;
+  }
+}

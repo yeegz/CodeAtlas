@@ -5,3 +5,9 @@ packages:
 
 allowBuilds:
   esbuild: true
+  # Both ship prebuilt binaries for supported platforms, and neither is on a
+  # path this milestone uses: image optimisation is unused and the Next ESLint
+  # resolver is not part of the workspace lint configuration. Least privilege
+  # keeps their install scripts from running.
+  sharp: false
+  unrs-resolver: false
