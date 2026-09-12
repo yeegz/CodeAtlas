@@ -9,7 +9,7 @@ Instead of another opaque score or AI-authored review summary, CodeAtlas is desi
 > [!IMPORTANT]
 > CodeAtlas is under active development. It is not yet a hosted service, GitHub App, or production sandbox. The current implementation lives on [`codex/codeatlas-evidence-core`](https://github.com/yeegz/CodeAtlas/tree/codex/codeatlas-evidence-core), and its local runner must only be used with repositories you trust.
 
-[Implementation status](#current-implementation-status) · [Development setup](#development-setup) · [More work by Yousof](https://yeegz.github.io)
+[Implementation status](#current-implementation-status) · [Development setup](#development-setup) · [More work by Yousof](https://yousofselim.com)
 
 ## What CodeAtlas is building
 
