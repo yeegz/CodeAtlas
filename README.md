@@ -7,7 +7,7 @@ CodeAtlas is an evidence-first change intelligence system for TypeScript and Jav
 Instead of another opaque score or AI-authored review summary, CodeAtlas is designed around inspectable claims: immutable source citations, static graph paths, observed runtime behavior, reproducible commands, explicit limitations, and cryptographically verifiable manifests.
 
 > [!IMPORTANT]
-> CodeAtlas is under active development. It is not yet a hosted service, GitHub App, or production sandbox. The current implementation lives on [`codex/codeatlas-evidence-core`](https://github.com/yeegz/CodeAtlas/tree/codex/codeatlas-evidence-core), and its local runner must only be used with repositories you trust.
+> CodeAtlas is under active development. The default `main` branch is the earlier evidence-core milestone snapshot. The current local implementation, including bounded execution, generated regression tests, Change Passport/CLI replay, and the Forensic Cartography workspace, lives on [`codex/codeatlas-evidence-core`](https://github.com/yeegz/CodeAtlas/tree/codex/codeatlas-evidence-core). Use it only with repositories you trust; it is not a hostile-code sandbox.
 
 [Implementation status](#current-implementation-status) · [Development setup](#development-setup) · [More work by Yousof](https://yousofselim.com)
 
@@ -48,7 +48,7 @@ A completed analysis should answer five practical questions:
 | GKE Autopilot + gVisor hostile-code sandbox              | Later production milestone     |
 | GitHub App for public/private repositories               | Later production milestone     |
 
-The development branch currently includes committed RED tests for the next runner hardening pass. That is an intentional pause point, not a green release tag.
+The default branch documents the milestone snapshot. For the working vertical slice and its verification commands, check out `codex/codeatlas-evidence-core`; that branch is the source of the capabilities listed above and is not a hosted release.
 
 ## Design principles
 
@@ -74,7 +74,7 @@ docs/superpowers/
   plans/      Task-level Evidence Core implementation plan
 ```
 
-Generator, differential, Passport pipeline, CLI, and web packages will land as the vertical slice progresses.
+The generator, differential comparison, Passport pipeline, CLI replay, and web workspace are implemented on the evidence-core branch and will be promoted to `main` after their release review.
 
 ## Development setup
 
@@ -100,7 +100,7 @@ pnpm typecheck
 pnpm lint
 ```
 
-The full runner suite is intentionally RED at the current pause commit while the next security invariants are implemented. See the implementation plan and branch history before treating a failure as a regression.
+The branch-local runner and end-to-end suites are the verification gate for the working vertical slice. The default branch keeps the earlier package-level review commands so its status remains accurate.
 
 ## Security boundary
 
