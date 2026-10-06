@@ -17,6 +17,8 @@
 
 ---
 
+[Implementation status](#what-is-actually-built) · [Setup](#setup) · [More work by Yousof](https://yousofselim.com)
+
 ## The short version
 
 When you review a pull request you can read the diff. What you cannot see is
@@ -164,7 +166,7 @@ You need Node.js 24.18 or newer (below 27) and pnpm 11.9.0, on macOS or Linux.
 Windows execution fails closed until a real process-tree boundary exists.
 
 ```bash
-git clone https://github.com/yeegz/CodeAtlas.git
+git clone --branch codex/replay-completion https://github.com/yeegz/CodeAtlas.git
 cd CodeAtlas
 git checkout codex/codeatlas-evidence-core
 corepack enable
@@ -191,8 +193,9 @@ browser acceptance suites, and a production build:
 pnpm verify
 ```
 
-It takes around twenty minutes. That is not overhead: the suites execute the
-fixture test suites for real, on both revisions, in child processes.
+The complete suite can take more than thirty minutes: it executes fixture
+tests on both revisions in child processes and copies private dependencies.
+Run it without competing analysis or test jobs to avoid resource contention.
 
 To open the workspace yourself:
 
