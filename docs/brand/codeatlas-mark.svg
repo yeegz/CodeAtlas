@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="CodeAtlas">
+  <title>CodeAtlas</title>
+  <defs>
+    <clipPath id="tile">
+      <rect width="64" height="64" rx="14" />
+    </clipPath>
+  </defs>
+  <g clip-path="url(#tile)">
+    <rect width="64" height="64" fill="#102832" />
+
+    <!-- Contour bands: distance from the change. -->
+    <g fill="none" stroke="#6F8A90" stroke-opacity=".55" stroke-width="1.6">
+      <circle cx="40" cy="30" r="11.5" />
+      <circle cx="40" cy="30" r="20.5" />
+    </g>
+
+    <!-- Inferred route: dotted, never presented as executed. -->
+    <path d="M15.5 15 L40 30" stroke="#8CA3AA" stroke-width="2.4"
+          stroke-linecap="round" stroke-dasharray="0.1 5.4" />
+
+    <!-- Observed route: solid, runtime confirmed. -->
+    <path d="M15.5 45 L40 30" stroke="#55D5AA" stroke-width="3.2"
+          stroke-linecap="round" />
+    <circle cx="15.5" cy="45" r="4.2" fill="#102832" stroke="#55D5AA" stroke-width="2.8" />
+
+    <!-- The change itself. -->
+    <rect x="33.5" y="23.5" width="13" height="13" rx="3.2" fill="#2368D7" />
+  </g>
+
+  <!-- Keeps the tile readable on a dark page. -->
+  <rect x=".6" y=".6" width="62.8" height="62.8" rx="13.4"
+        fill="none" stroke="#FFFFFF" stroke-opacity=".12" stroke-width="1.2" />
+</svg>

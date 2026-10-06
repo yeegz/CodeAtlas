@@ -1,121 +1,279 @@
-# CodeAtlas
+<p align="center">
+  <img src="docs/brand/codeatlas-mark.svg" width="88" height="88" alt="" />
+</p>
 
-**Evidence for what a code change actually does.**
+<h1 align="center">CodeAtlas</h1>
 
-CodeAtlas is an evidence-first change intelligence system for TypeScript and JavaScript repositories. It maps a change through the codebase, selects the tests that can explain its impact, compares behavior across base and head revisions, and packages the result into a signed Change Passport.
+<p align="center">
+  <strong>See what your change actually broke — with proof you can re-run.</strong>
+</p>
 
-Instead of another opaque score or AI-authored review summary, CodeAtlas is designed around inspectable claims: immutable source citations, static graph paths, observed runtime behavior, reproducible commands, explicit limitations, and cryptographically verifiable manifests.
+<p align="center">
+  <img alt="Node 24.18+" src="https://img.shields.io/badge/node-24.18%2B-102832" />
+  <img alt="pnpm 11.9.0" src="https://img.shields.io/badge/pnpm-11.9.0-102832" />
+  <img alt="TypeScript 5.9" src="https://img.shields.io/badge/typescript-5.9-2368D7" />
+  <img alt="Status: local evidence core working" src="https://img.shields.io/badge/local%20evidence%20core-working-55D5AA" />
+</p>
 
-> [!IMPORTANT]
-> CodeAtlas is under active development. The default `main` branch is the earlier evidence-core milestone snapshot. The current local implementation, including bounded execution, generated regression tests, Change Passport/CLI replay, and the Forensic Cartography workspace, lives on [`codex/codeatlas-evidence-core`](https://github.com/yeegz/CodeAtlas/tree/codex/codeatlas-evidence-core). Use it only with repositories you trust; it is not a hostile-code sandbox.
+---
 
-[Implementation status](#current-implementation-status) · [Development setup](#development-setup) · [More work by Yousof](https://yousofselim.com)
+[Implementation status](#what-is-actually-built) · [Setup](#setup) · [Verification](docs/verification.md) · [More work by Yousof](https://yousofselim.com)
 
-## What CodeAtlas is building
+## The short version
+
+When you review a pull request you can read the diff. What you cannot see is
+what the change **does**.
+
+CodeAtlas runs your tests against both versions of the code, watches what
+actually happens, and tells you what changed in the behaviour — not in the
+text. When it finds something, it hands you a command that reproduces it on
+your own machine.
+
+It is deliberately narrow. It does not score your code, summarise your diff, or
+tell you a change is safe to merge. It shows you evidence and says plainly which
+parts it could not verify.
+
+<p align="center">
+  <img src="docs/images/workspace.png" alt="The CodeAtlas workspace showing a confirmed regression: expired sessions returned HTTP 401 on the base revision and HTTP 500 on the head revision, with the evidence map, the tests that ran and why, and a Proof Card." width="900" />
+</p>
+
+## See it work
+
+The repository ships a small authentication change with a bug hidden in it. The
+existing test suite passes on both versions, so a normal CI run would tell you
+nothing.
+
+```bash
+node apps/cli/bin/codeatlas.mjs analyze \
+  --base fixtures/auth-regression/base \
+  --head fixtures/auth-regression/head \
+  --out .codeatlas/demo
+```
+
+```text
+State: ACTION_REQUIRED
+Changed symbols: validateToken (src/auth.ts)
+Selected tests: test/auth.test.ts
+  test/auth.test.ts: Calls restoreSession(), which reaches changed validateToken().
+
+Generated tests:
+  test/codeatlas.expired-session.test.ts (generated; executed on base: yes, head: yes)
+
+Findings:
+  [CONFIRMED_REGRESSION] Expired sessions return an internal error
+    base: HTTP 401 with SESSION_EXPIRED
+    head: HTTP 500 with INTERNAL_ERROR
+    journey: Returning user → Restore session → Validate expired token
+    replay: codeatlas replay finding_expired_session
+```
+
+Nothing in that output is inferred. The expired-session test was written because
+a changed branch had no test covering it, then compiled and executed on both
+revisions. The 401 and the 500 were observed.
+
+Now reproduce it, exactly as the Proof Card says:
+
+```bash
+node apps/cli/bin/codeatlas.mjs replay finding_expired_session
+```
+
+```text
+Base produced HTTP 401 with SESSION_EXPIRED; head produced HTTP 500 with INTERNAL_ERROR.
+REPRODUCED finding_expired_session
+```
+
+Replay verifies every artifact digest, the manifest digest and the signature
+**before it starts a single test process**. Change one byte of the evidence and
+it exits without running anything.
+
+## What you get
+
+| Output              | What it is                                                                                                                                                     |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Proof Card**      | One finding: what the base did, what the head did, which journey it affects, the exact code path, why it is confident, and what it could not check.            |
+| **Change Passport** | The permanent record for the whole comparison, as JSON and Markdown, with a signed Evidence Manifest.                                                          |
+| **Replay**          | One command that re-runs the recorded evidence and prints `REPRODUCED`, `NOT_REPRODUCED` or `ENVIRONMENT_MISMATCH`.                                            |
+| **Workspace**       | A map of what the change touched, with runtime-confirmed routes drawn solid and inferred ones dotted — plus a list view carrying exactly the same information. |
+
+## How it works
 
 ```mermaid
 flowchart LR
-    A["Base + head snapshots"] --> B["Static evidence map"]
-    B --> C["Explainable test selection"]
-    C --> D["Bounded differential execution"]
-    D --> E["Proof Cards"]
-    E --> F["Signed Change Passport"]
-    F --> G["Forensic Cartography workspace"]
+    A["Base + head<br/>snapshots"] --> B["Map the<br/>change"]
+    B --> C["Pick the tests<br/>that can explain it"]
+    C --> D["Run both versions<br/>and watch"]
+    D --> E["Compare what<br/>actually happened"]
+    E --> F["Proof Card +<br/>signed Passport"]
 ```
 
-A completed analysis should answer five practical questions:
+1. **Map the change.** Parse both snapshots and work out which symbols and
+   branches actually changed. No repository code is executed at this stage.
+2. **Pick the tests.** Walk the call graph back from the changed symbols to the
+   tests that reach them. Every selection records a sentence explaining itself.
+3. **Fill the gaps.** Where a changed branch has no test covering it, derive an
+   objective and generate one narrow test for it. The generator cannot choose
+   its own objective or vouch for its own output.
+4. **Run both versions.** Execute the existing and generated tests on base and
+   head, three times each, under time and output limits.
+5. **Compare.** A regression is only confirmed when the test compiled, both
+   sides ran in matching environments, base passed, head failed with a real
+   behavioural difference, and the result repeated. Anything else is reported as
+   `UNVERIFIED` with the reason.
+6. **Sign it.** Canonicalise the evidence, sign it with Ed25519, and write a
+   reproduction bundle.
 
-1. What changed at the symbol and branch level?
-2. Which journeys and tests are connected to it, and why?
-3. What behavior was observed on the base and head revisions?
-4. Which claims are confirmed, probable, possible, or still unverified?
-5. Can another developer reproduce and verify the evidence independently?
+## What is actually built
 
-## Current implementation status
+Everything below runs locally, against local snapshots.
 
-| Capability                                               | Status                         |
-| -------------------------------------------------------- | ------------------------------ |
-| Strict evidence, finding, Passport, and manifest schemas | Review complete                |
-| Canonical SHA-256 + Ed25519 manifest signing             | Review complete                |
-| Non-executing TypeScript/JavaScript snapshot analysis    | Review complete                |
-| Changed-line, symbol, call, export, and test mapping     | Review complete                |
-| Deterministic, explainable test selection                | Review complete                |
-| Bounded local Vitest execution                           | Security hardening in progress |
-| Generated regression tests and differential findings     | Next                           |
-| Change Passport pipeline, CLI, and replay                | Planned in this milestone      |
-| Forensic Cartography web workspace                       | Planned in this milestone      |
-| Firebase control plane and hosting                       | Later production milestone     |
-| GKE Autopilot + gVisor hostile-code sandbox              | Later production milestone     |
-| GitHub App for public/private repositories               | Later production milestone     |
+| Capability                                             | Status    |
+| ------------------------------------------------------ | --------- |
+| Evidence, finding, Passport and manifest schemas       | Working   |
+| Canonical SHA-256 + Ed25519 manifest signing           | Working   |
+| TypeScript/JavaScript snapshot analysis (no execution) | Working   |
+| Changed-line, symbol, call, export and test mapping    | Working   |
+| Explainable test selection                             | Working   |
+| Bounded local test execution (**trusted code only**)   | Working   |
+| Generated regression tests and differential findings   | Working   |
+| Change Passport, CLI and replay                        | Working   |
+| Forensic Cartography workspace                         | Working   |
+| Hosted app, sign-in, Firebase control plane            | Not built |
+| gVisor sandbox for untrusted repositories              | Not built |
+| GitHub App for public/private repositories             | Not built |
 
-The default branch documents the milestone snapshot. For the working vertical slice and its verification commands, check out `codex/codeatlas-evidence-core`; that branch is the source of the capabilities listed above and is not a hosted release.
+There is no hosted service, no GitHub App and no sandbox for untrusted code.
+Those are separate milestones and this README will not claim them until they
+exist.
 
-## Design principles
+## The rules it follows
 
-- **Observed evidence outranks inference.** Static analysis and AI suggestions can guide investigation, but only repeatable base/head execution can confirm a regression.
-- **AI is optional.** Core mapping, selection, execution, comparison, signing, and replay remain useful with AI disabled.
-- **Every citation is immutable.** Source locations carry a snapshot digest and a repository-relative path.
-- **Generated tests cannot certify themselves.** They must execute on both revisions and be corroborated by independent evidence.
-- **Unknown means unknown.** Missing, malformed, timed-out, or contradictory evidence becomes `UNVERIFIED`; it is never converted into a confidence percentage.
-- **Security boundaries are named honestly.** Local process containment is not presented as a hostile-code sandbox.
+- **What was observed beats what was guessed.** Static analysis points you at
+  suspects. Only repeatable execution on both versions can confirm a regression.
+- **AI is optional.** Mapping, selection, execution, comparison, signing and
+  replay all work with it switched off.
+- **Every citation is pinned.** Source locations carry a snapshot digest, never
+  a branch name that can move underneath them.
+- **Generated tests cannot vouch for themselves.** They have to compile, run on
+  both versions, and stay labelled as generated.
+- **Unknown stays unknown.** Missing, malformed or contradictory evidence
+  becomes `UNVERIFIED`. It never gets rounded up into a confidence percentage.
+- **Boundaries are described honestly.** Local process containment is not a
+  sandbox, and this project does not pretend otherwise.
 
-## Repository layout
+## Setup
 
-```text
-packages/
-  evidence/   Validated evidence, findings, Passports, and signed manifests
-  analyzer/   Static snapshot mapping and content-addressed change analysis
-  selector/   Deterministic graph-based test selection and explanations
-  runner/     Bounded trusted-local Vitest execution (in hardening)
-fixtures/
-  auth-regression/  Base/head snapshots with an intentionally hidden regression
-docs/superpowers/
-  specs/      Approved product and architecture specification
-  plans/      Task-level Evidence Core implementation plan
-```
-
-The generator, differential comparison, Passport pipeline, CLI replay, and web workspace are implemented on the evidence-core branch and will be promoted to `main` after their release review.
-
-## Development setup
-
-Requirements:
-
-- Node.js `24.18.0` or newer within the declared `<27` range
-- pnpm `11.9.0`
-- macOS or Linux for the current trusted-local runner; Windows execution fails closed until a real process-tree boundary is implemented
+You need Node.js 24.18 or newer (below 27) and pnpm 11.9.0, on macOS or Linux.
+Windows execution fails closed until a real process-tree boundary exists.
 
 ```bash
 git clone https://github.com/yeegz/CodeAtlas.git
 cd CodeAtlas
-git checkout codex/codeatlas-evidence-core
 corepack enable
 pnpm install --frozen-lockfile
 ```
 
-Run the review-complete core packages:
+Before [PR #5](https://github.com/yeegz/CodeAtlas/pull/5) merges, insert these
+commands after `cd CodeAtlas` to use the complete implementation:
 
 ```bash
-pnpm vitest run packages/evidence/test packages/analyzer/test packages/selector/test
-pnpm typecheck
-pnpm lint
+git fetch origin pull/5/head
+git checkout --detach FETCH_HEAD
 ```
 
-The branch-local runner and end-to-end suites are the verification gate for the working vertical slice. The default branch keeps the earlier package-level review commands so its status remains accurate.
+Node 25 and newer no longer bundle Corepack. If `corepack enable` is not
+available, install the pinned package manager directly:
 
-## Security boundary
+```bash
+npm install -g pnpm@11.9.0
+```
 
-The current `LocalExecutionProvider` copies a snapshot into a temporary directory, validates paths, limits time/output/file count, minimizes the child environment, invokes executables without shell interpolation, and removes the temporary run directory. It still executes repository code as the host user.
+Acceptance tests drive a real browser, so install it once:
 
-**Do not use the local provider with untrusted third-party repositories.** Hosted third-party execution will not ship until the GKE Autopilot + gVisor sandbox, source broker, egress policy, quotas, and adversarial acceptance tests are complete.
+```bash
+pnpm exec playwright install chromium
+```
 
-For vulnerability reporting, see [SECURITY.md](SECURITY.md).
+Then run the whole gate — formatting, lint, types, every test, the CLI and
+browser acceptance suites, and a production build:
 
-## Product direction
+```bash
+pnpm verify
+```
 
-The interface is called **Forensic Cartography**: a calm, map-first workspace where changed nodes, observed runtime paths, inferred edges, failures, evidence, and limitations remain visually distinct. The design avoids decorative dashboards, fake confidence metrics, glassmorphism, and unsupported “safe to merge” claims.
+Check the installed dependency graph separately:
 
-The approved architecture and visual/product decisions are documented in [`docs/superpowers/specs/2026-07-29-codeatlas-product-design.md`](docs/superpowers/specs/2026-07-29-codeatlas-product-design.md). The active vertical-slice plan is in [`docs/superpowers/plans/2026-07-29-codeatlas-evidence-core-vertical-slice.md`](docs/superpowers/plans/2026-07-29-codeatlas-evidence-core-vertical-slice.md).
+```bash
+pnpm audit
+pnpm audit --prod
+```
+
+`pnpm typecheck` generates Next.js route declarations before checking the
+workspace, so it also works on a fresh checkout without a prior web build.
+The [verification record](docs/verification.md) identifies the checked revision,
+local results, and the separate Linux CI gate.
+
+The complete suite can take more than thirty minutes: it executes fixture
+tests on both revisions in child processes and copies private dependencies.
+Run it without competing analysis or test jobs to avoid resource contention.
+
+To open the workspace yourself:
+
+```bash
+pnpm --filter @codeatlas/web dev
+```
+
+That script sets `CODEATLAS_DEMO_MODE=true`. Without it, the demo endpoint
+returns 404 and the workspace offers no way to execute anything.
+
+## Before you point it at someone else's code
+
+**Don't.** Running an analysis executes the repository's test suite as your user,
+with your filesystem and your network.
+
+The local runner copies the snapshot to a temporary directory, rejects symlinks
+that escape it, spawns processes with argument arrays and no shell, strips the
+environment, caps time and output, and cleans up afterwards. That reduces
+accidental damage. It is **not** a security boundary and will not stop code that
+is trying to get out.
+
+Untrusted repositories are the job of the gVisor sandbox in a later milestone.
+The full boundary, including what the local signing key does and does not prove,
+is written up in
+[docs/security/local-execution-boundary.md](docs/security/local-execution-boundary.md).
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
+
+## Documentation
+
+| Document                                                                                           | What it covers                                                       |
+| -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| [Architecture](docs/architecture/evidence-core.md)                                                 | Package graph, orchestration order, replaceable boundaries           |
+| [Local execution boundary](docs/security/local-execution-boundary.md)                              | What is and is not contained, and the trust model of the signing key |
+| [Evidence Manifest v1](docs/evidence-manifest-v1.md)                                               | Manifest fields, canonicalisation, and how to verify one yourself    |
+| [Verification record](docs/verification.md)                                                        | Release scope, local checks, dependency audits and CI evidence       |
+| [Product design](docs/superpowers/specs/2026-07-29-codeatlas-product-design.md)                    | The approved specification                                           |
+| [Implementation plan](docs/superpowers/plans/2026-07-29-codeatlas-evidence-core-vertical-slice.md) | The task-level plan this milestone followed                          |
 
 ## Contributing
 
-CodeAtlas is being built test-first with focused commits and task-level review gates. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a change. Please do not describe incomplete hosted, private-repository, Firebase, or GKE capabilities as shipped.
+CodeAtlas is built test-first, in focused commits, with a review gate per task.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) first.
+
+One request above all others: **do not describe unbuilt capability as shipped.**
+The whole point of this project is that its claims can be checked.
+
+## Repeatable setup and replay
+
+From this implementation checkout, `pnpm dev` opens the local workspace and
+`pnpm codeatlas --help` lists the CLI commands. For an unmerged implementation,
+use the pull-request checkout instructions above.
+
+Replay requires a usable Ed25519 public key in `evidence-manifest.sig`; missing
+verification material is rejected before snapshots or test processes are used.
+Repeated analyses retain their immutable artifacts and publish a current
+`reproduction-bundle.json` in the run directory so finding-ID replay uses the
+matching signature. Export directories preserve their own bundle and sidecars.
+To replay an older analysis, pass its explicit exported bundle path.
+
+GitHub Actions now runs the full verification gate on pushes and pull requests.
+Local results and remote CI results are separate; a workflow file alone does
+not establish that the hosted checks have passed.
