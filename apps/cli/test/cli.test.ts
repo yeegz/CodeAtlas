@@ -111,6 +111,96 @@ describe("codeatlas analyze", () => {
     REPLAY_TIMEOUT_MS,
   );
 
+  it("rejects a missing signature before resolving or executing snapshots", async () => {
+    const signaturePath = join(outputDirectory, "evidence-manifest.sig");
+    const signature = await readFile(signaturePath, "utf8");
+    try {
+      await rm(signaturePath);
+      const replay = await runCli([
+        "replay",
+        join(outputDirectory, "reproduction-bundle.json"),
+        "--base",
+        join(outputDirectory, "nonexistent-snapshot"),
+      ]);
+      expect(replay.exitCode).toBe(5);
+      expect(replay.stderr).toContain("evidence-manifest.sig is required");
+      expect(replay.stdout).toBe("");
+    } finally {
+      await writeFile(signaturePath, signature, "utf8");
+    }
+  });
+
+  it.each([false, true])(
+    "ignores an older bundle left by a repeated analysis (legacy: %s)",
+    async (legacy) => {
+      const contents = await readFile(
+        join(outputDirectory, "reproduction-bundle.json"),
+        "utf8",
+      );
+      const bundle = JSON.parse(contents);
+      const directory = join(
+        workspaceRoot,
+        ".codeatlas",
+        "runs",
+        bundle.analysisId,
+      );
+      const pointerPath = join(directory, "reproduction-bundle.json");
+      const stalePath = join(
+        directory,
+        `reproduction-bundle-sha256-${"0".repeat(64)}.json`,
+      );
+      const pointer = await readFile(pointerPath, "utf8");
+      try {
+        // A previous run's bundle sorts first but refers to a different manifest.
+        await writeFile(
+          stalePath,
+          JSON.stringify({
+            ...bundle,
+            manifestDigest: `sha256:${"0".repeat(64)}`,
+          }),
+        );
+        if (legacy) await rm(pointerPath);
+        const replay = await runCli([
+          "replay",
+          "finding_expired_session",
+          "--base",
+          join(outputDirectory, "nonexistent-snapshot"),
+        ]);
+        expect(replay.exitCode).toBe(5);
+        // Resolving snapshots proves the current signed bundle passed integrity.
+        expect(replay.stderr).toContain("base snapshot does not exist");
+        expect(replay.stderr).not.toContain("integrity verification failed");
+      } finally {
+        await rm(stalePath, { force: true });
+        await writeFile(pointerPath, pointer);
+      }
+    },
+  );
+
+  it("rejects an empty public key before resolving or executing snapshots", async () => {
+    const signaturePath = join(outputDirectory, "evidence-manifest.sig");
+    const signature = await readFile(signaturePath, "utf8");
+    try {
+      await writeFile(
+        signaturePath,
+        JSON.stringify({ ...JSON.parse(signature), publicKey: "" }),
+      );
+      const replay = await runCli([
+        "replay",
+        join(outputDirectory, "reproduction-bundle.json"),
+        "--base",
+        join(outputDirectory, "nonexistent-snapshot"),
+      ]);
+      expect(replay.exitCode).toBe(5);
+      expect(replay.stderr).toContain(
+        "evidence-manifest.sig has no usable public key",
+      );
+      expect(replay.stdout).toBe("");
+    } finally {
+      await writeFile(signaturePath, signature, "utf8");
+    }
+  });
+
   it(
     "refuses to replay a bundle whose artifact digest was modified",
     async () => {

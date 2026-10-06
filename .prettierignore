@@ -10,3 +10,7 @@ pnpm-lock.yaml
 # exact bytes determine the content snapshot digests that tests assert against,
 # so reformatting them would silently change every recorded analysis id.
 fixtures/
+
+# Disposable runner test snapshots.
+.runner-review-snapshot-*/
+.runner-symlink-*/

@@ -115,7 +115,7 @@ export async function runReplay(
   }
 
   const publicKey = await readPublicKey(located.directory);
-  if (publicKey !== undefined && !verifyManifest(signed, publicKey)) {
+  if (!verifyManifest(signed, publicKey)) {
     throw new SecurityPolicyError(
       `${INTEGRITY_FAILURE}: manifest signature verification failed`,
     );
@@ -324,6 +324,33 @@ async function locateBundle(
       if (!isNotFound(error)) throw error;
       continue;
     }
+    // The current export is published after its verification sidecars. Old
+    // content-addressed bundles remain immutable; their signatures may belong
+    // to an earlier run of the same comparison and must not be selected by hash.
+    if (names.includes("reproduction-bundle.json")) {
+      const contents = await readFile(
+        join(directory, "reproduction-bundle.json"),
+        "utf8",
+      );
+      const candidate = parseBundle(contents);
+      if (candidate.findingIds.includes(target)) {
+        return { contents, directory, findingId: target };
+      }
+      continue;
+    }
+    // Backward compatibility for analyses created before the current-export
+    // pointer: select only the bundle bound to the present signature envelope.
+    let currentDigest: unknown;
+    try {
+      currentDigest = JSON.parse(
+        await readFile(join(directory, "evidence-manifest.sig"), "utf8"),
+      ).digest;
+    } catch (error) {
+      if (isNotFound(error)) continue;
+      throw new SecurityPolicyError(
+        `${INTEGRITY_FAILURE}: invalid signature envelope`,
+      );
+    }
     for (const name of names.sort()) {
       if (!name.startsWith("reproduction-bundle-")) continue;
       const contents = await readFile(join(directory, name), "utf8");
@@ -333,7 +360,10 @@ async function locateBundle(
       } catch {
         continue;
       }
-      if (candidate.findingIds.includes(target)) {
+      if (
+        candidate.manifestDigest === currentDigest &&
+        candidate.findingIds.includes(target)
+      ) {
         return { contents, directory, findingId: target };
       }
     }
@@ -475,14 +505,15 @@ async function readArtifacts(
   return artifacts;
 }
 
-async function readPublicKey(
-  directory: string,
-): Promise<KeyObject | undefined> {
+async function readPublicKey(directory: string): Promise<KeyObject> {
   let contents: string;
   try {
     contents = await readFile(join(directory, "evidence-manifest.sig"), "utf8");
   } catch (error) {
-    if (isNotFound(error)) return undefined;
+    if (isNotFound(error))
+      throw new SecurityPolicyError(
+        `${INTEGRITY_FAILURE}: evidence-manifest.sig is required`,
+      );
     throw error;
   }
   let parsed: unknown;
@@ -494,7 +525,11 @@ async function readPublicKey(
     );
   }
   const key = (parsed as { publicKey?: unknown } | null)?.publicKey;
-  if (typeof key !== "string" || key.length === 0) return undefined;
+  if (typeof key !== "string" || key.length === 0) {
+    throw new SecurityPolicyError(
+      `${INTEGRITY_FAILURE}: evidence-manifest.sig has no usable public key`,
+    );
+  }
   try {
     return createPublicKey(key);
   } catch {

@@ -131,6 +131,17 @@ export async function runAnalyze(
     context,
   );
 
+  await writeFileAtomic(
+    join(
+      workspaceRoot,
+      ".codeatlas",
+      "runs",
+      output.analysisId,
+      "reproduction-bundle.json",
+    ),
+    `${JSON.stringify(output.reproductionBundle, null, 2)}\n`,
+  );
+
   if (options.json === true) {
     stdout.write(
       `${JSON.stringify(summarize(output, outputDirectory), null, 2)}\n`,

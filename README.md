@@ -237,3 +237,20 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) first.
 
 One request above all others: **do not describe unbuilt capability as shipped.**
 The whole point of this project is that its claims can be checked.
+
+## Repeatable setup and replay
+
+From this implementation checkout, `pnpm dev` opens the local workspace and
+`pnpm codeatlas --help` lists the CLI commands. The default branch still needs
+the implementation branch promoted before it provides this full project.
+
+Replay requires a usable Ed25519 public key in `evidence-manifest.sig`; missing
+verification material is rejected before snapshots or test processes are used.
+Repeated analyses retain their immutable artifacts and publish a current
+`reproduction-bundle.json` in the run directory so finding-ID replay uses the
+matching signature. Export directories preserve their own bundle and sidecars.
+To replay an older analysis, pass its explicit exported bundle path.
+
+GitHub Actions now runs the full verification gate on pushes and pull requests.
+Local results and remote CI results are separate; a workflow file alone does
+not establish that the hosted checks have passed.

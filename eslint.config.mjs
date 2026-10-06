@@ -10,6 +10,8 @@ export default tseslint.config(
       "**/coverage/",
       "**/dist/",
       "**/node_modules/",
+      ".runner-review-snapshot-*/",
+      ".runner-symlink-*/",
     ],
   },
   tseslint.configs.recommended,

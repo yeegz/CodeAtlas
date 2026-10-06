@@ -19,3 +19,7 @@ test-results/
 playwright-report/
 blob-report/
 .playwright/
+
+# Disposable runner test snapshots.
+.runner-review-snapshot-*/
+.runner-symlink-*/
