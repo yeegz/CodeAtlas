@@ -680,6 +680,55 @@ describe("LocalArtifactStore", () => {
     }
   });
 
+  it("pins the temp inode through publication and cleanup, then closes it", async () => {
+    const repositoryRoot = await mkdtemp(join(tmpdir(), "codeatlas-store-"));
+    let temporaryHandle: Awaited<ReturnType<typeof fsOpen>> | undefined;
+    let openDuringPublication = false;
+    let openDuringCleanup = false;
+    const isTempOpen = async () => {
+      try {
+        await temporaryHandle!.stat();
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      const fileSystem = injectedFileSystem({
+        async open(path, flags, mode) {
+          const handle = await fsOpen(path, flags, mode);
+          if (String(path).includes(".temporary-")) temporaryHandle = handle;
+          return handle;
+        },
+        async link() {
+          openDuringPublication = await isTempOpen();
+          throw new Error("publication failure");
+        },
+        async unlink(path) {
+          openDuringCleanup = await isTempOpen();
+          return fsUnlink(path);
+        },
+      });
+      const store = localStoreWithFileSystem(
+        repositoryRoot,
+        `analysis_${"7".repeat(64)}`,
+        fileSystem,
+      );
+
+      await expect(store.putJson("record", { safe: true })).rejects.toThrow(
+        /publication failure/i,
+      );
+      expect(openDuringPublication).toBe(true);
+      expect(openDuringCleanup).toBe(true);
+      await expect(temporaryHandle!.stat()).rejects.toMatchObject({
+        code: "EBADF",
+      });
+    } finally {
+      await temporaryHandle?.close();
+      await rm(repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
   it("preserves a publication error after successful owned-temp cleanup", async () => {
     const repositoryRoot = await mkdtemp(join(tmpdir(), "codeatlas-store-"));
     try {

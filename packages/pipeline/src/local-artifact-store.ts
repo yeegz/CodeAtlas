@@ -139,8 +139,9 @@ export class LocalArtifactStore implements ArtifactStore {
       await handle.chmod(0o600);
       const temporaryInfo = await handle.stat();
       assertPrivateRegularFile(temporaryInfo, "temporary artifact");
-      await handle.close();
-      handle = undefined;
+      // Keep the inode pinned until ownership-checked cleanup finishes. If
+      // this path is replaced after closing, the filesystem can reuse its
+      // inode and make the replacement look like our temporary file.
 
       await this.#revalidateDirectory(directory);
       try {
@@ -160,11 +161,6 @@ export class LocalArtifactStore implements ArtifactStore {
       throw error;
     } finally {
       let cleanupError: unknown;
-      try {
-        await handle?.close();
-      } catch (error) {
-        cleanupError = error;
-      }
       if (ownsTemp && temporaryIdentity !== undefined) {
         try {
           const removed = await removeOwnedTemporaryFile(
@@ -176,6 +172,11 @@ export class LocalArtifactStore implements ArtifactStore {
         } catch (error) {
           cleanupError ??= error;
         }
+      }
+      try {
+        await handle?.close();
+      } catch (error) {
+        cleanupError ??= error;
       }
       if (primaryError === undefined && cleanupError !== undefined) {
         throw cleanupError;

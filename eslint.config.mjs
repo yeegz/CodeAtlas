@@ -6,6 +6,8 @@ export default tseslint.config(
     // needs `**/` to also cover generated output inside workspace packages.
     ignores: [
       "**/.next/",
+      // Next regenerates this declaration file during typegen and builds.
+      "**/next-env.d.ts",
       "**/.codeatlas/",
       "**/coverage/",
       "**/dist/",

@@ -15,7 +15,7 @@
     "@codeatlas/passport": "workspace:*",
     "@codeatlas/pipeline": "workspace:*",
     "@codeatlas/runner": "workspace:*",
-    "next": "15.2.9",
+    "next": "15.5.27",
     "react": "19.0.8",
     "react-dom": "19.0.8"
   },
@@ -25,7 +25,6 @@
     "@testing-library/user-event": "14.6.1",
     "@types/react": "19.0.14",
     "@types/react-dom": "19.0.6",
-    "eslint-config-next": "15.2.9",
     "jsdom": "30.0.0"
   }
 }

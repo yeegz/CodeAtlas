@@ -1,17 +1,18 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { lstat, readdir, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
-import fg from "fast-glob";
+import { glob } from "tinyglobby";
 
-const IGNORED_PATHS = [
-  "**/node_modules/**",
-  "**/dist/**",
-  "**/build/**",
-  "**/out/**",
-  "**/coverage/**",
-  "**/.git/**",
-];
+const IGNORED_DIRECTORIES = new Set([
+  "node_modules",
+  "dist",
+  "build",
+  "out",
+  "coverage",
+  ".git",
+]);
+const IGNORED_PATHS = [...IGNORED_DIRECTORIES].map((name) => `**/${name}/**`);
 
 function isWithinRoot(root: string, candidate: string): boolean {
   const relativePath = relative(root, candidate);
@@ -41,23 +42,24 @@ function repositoryPath(root: string, absolutePath: string): string {
 }
 
 async function assertNoEscapingSymlinks(root: string): Promise<void> {
-  const entries = await fg("**/*", {
-    cwd: root,
-    dot: true,
-    onlyFiles: false,
-    followSymbolicLinks: false,
-    ignore: IGNORED_PATHS,
-    absolute: true,
-  });
-
-  for (const entry of entries) {
-    const stats = await lstat(entry);
-    if (!stats.isSymbolicLink()) continue;
-    const target = await realpath(entry);
-    if (!isWithinRoot(root, target)) {
-      throw new Error(
-        `Symlink escapes snapshot root: ${repositoryPath(root, entry)}`,
-      );
+  // Globbing without following links omits them entirely. Inspect directory
+  // entries separately so even non-source and hidden links are validated.
+  const directories = [root];
+  while (directories.length > 0) {
+    const directory = directories.pop()!;
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (IGNORED_DIRECTORIES.has(entry.name)) continue;
+      const path = resolve(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        const target = await realpath(path);
+        if (!isWithinRoot(root, target)) {
+          throw new Error(
+            `Symlink escapes snapshot root: ${repositoryPath(root, path)}`,
+          );
+        }
+      } else if (entry.isDirectory()) {
+        directories.push(path);
+      }
     }
   }
 }
@@ -75,11 +77,12 @@ export async function readSnapshotFiles(
 ): Promise<{ root: string; files: SnapshotFileContent[] }> {
   const root = await realpath(resolve(suppliedRoot));
   await assertNoEscapingSymlinks(root);
-  const entries = await fg(patterns, {
+  const entries = await glob(patterns, {
     cwd: root,
     dot: true,
     onlyFiles: true,
     followSymbolicLinks: false,
+    expandDirectories: false,
     ignore: IGNORED_PATHS,
     absolute: true,
   });

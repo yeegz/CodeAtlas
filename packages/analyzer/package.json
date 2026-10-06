@@ -12,7 +12,10 @@
   "dependencies": {
     "@codeatlas/evidence": "workspace:*",
     "diff": "9.0.0",
-    "fast-glob": "3.3.3",
+    "tinyglobby": "0.2.17",
     "typescript": "5.9.3"
+  },
+  "devDependencies": {
+    "@types/picomatch": "4.0.3"
   }
 }
