@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   access,
   chmod,
@@ -16,6 +16,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import {
   accessSync,
   constants as fsConstants,
@@ -39,10 +40,16 @@ import type {
   ExecutionRequest,
   ExecutionResult,
 } from "./execution-provider.js";
+import { computeExecutionResultDigest } from "./execution-result-digest.js";
 import {
   parseVitestResult,
+  requiresStructuredReporter,
   unexecutedGeneratedTests,
 } from "./vitest-result.js";
+import {
+  trustedVitestReporterSource,
+  verifyTrustedVitestReport,
+} from "./trusted-vitest-reporter.js";
 
 const RUNNER_VERSION = "0.1.0";
 const EXCLUDED_COPY_NAMES = new Set(["node_modules", "coverage", ".git"]);
@@ -57,6 +64,7 @@ export interface LocalExecutionProviderOptions {
   /** @deprecated Use pnpmCliPath. This path must still be a JavaScript CLI, never a shim. */
   pnpmPath?: string;
   temporaryParent?: string;
+  platform?: NodeJS.Platform;
 }
 
 interface RuntimeIdentity {
@@ -65,23 +73,45 @@ interface RuntimeIdentity {
   environmentDigest: string;
 }
 
+interface LocalExecutionProviderInternals {
+  platform?: NodeJS.Platform;
+}
+
 export class LocalExecutionProvider implements ExecutionProvider {
   readonly #workspaceRoot: string;
   readonly #nodePath: string;
   readonly #pnpmCliPath: string;
   readonly #temporaryParent: string;
+  readonly #unsupportedPlatform: boolean;
 
-  constructor(options: LocalExecutionProviderOptions = {}) {
+  constructor(
+    options: LocalExecutionProviderOptions = {},
+    internals: LocalExecutionProviderInternals = {},
+  ) {
     this.#workspaceRoot = resolve(options.workspaceRoot ?? process.cwd());
     this.#nodePath = resolveNodePath(options.nodePath);
     this.#pnpmCliPath = resolvePnpmCliPath(
       options.pnpmCliPath ?? options.pnpmPath,
     );
     this.#temporaryParent = resolve(options.temporaryParent ?? tmpdir());
+    this.#unsupportedPlatform =
+      process.platform === "win32" ||
+      options.platform === "win32" ||
+      internals.platform === "win32";
   }
 
   async run(request: ExecutionRequest): Promise<ExecutionResult> {
     validatePolicy(request.policy);
+    const startedAt = performance.now();
+    if (this.#unsupportedPlatform) {
+      return buildResult(request, unsupportedRuntimeIdentity(), startedAt, {
+        terminalState: "FAILED",
+        exitCode: null,
+        stdout: "",
+        stderr:
+          "Unsupported platform win32: test execution requires a descendant containment boundary",
+      });
+    }
     const testPaths = request.testPaths.map((path) =>
       validateRelativePath(path, "test path"),
     );
@@ -113,11 +143,12 @@ export class LocalExecutionProvider implements ExecutionProvider {
       this.#nodePath,
       this.#pnpmCliPath,
     );
-    const startedAt = performance.now();
     let attemptRoot: string | null = null;
     let snapshotCopy: string | null = null;
     let controlRoot: string | null = null;
     let childPid: number | undefined;
+    let resultArtifact: BoundArtifact | null = null;
+    let coverageArtifact: BoundArtifact | null = null;
     let stdout = "";
     let stderr = "";
 
@@ -163,6 +194,46 @@ export class LocalExecutionProvider implements ExecutionProvider {
         controlRoot,
         `vitest-result-${randomUUID()}.json`,
       );
+      resultArtifact = await precreateBoundArtifact(resultPath);
+      const useTrustedReporter = requiresStructuredReporter(
+        request.generatedFiles,
+      );
+      const reportNonce = randomUUID();
+      const reportKey = randomBytes(32).toString("hex");
+      const reporterPath = useTrustedReporter
+        ? join(controlRoot, `vitest-reporter-${randomUUID()}.mjs`)
+        : null;
+      const trustedConfigPath = useTrustedReporter
+        ? join(controlRoot, `vitest-config-${randomUUID()}.mjs`)
+        : null;
+      const coverageDirectory = join(controlRoot, `coverage-${randomUUID()}`);
+      await mkdir(coverageDirectory, { mode: 0o700 });
+      const coveragePath = join(coverageDirectory, "coverage-final.json");
+      const trustedCoveragePath = useTrustedReporter
+        ? join(controlRoot, `trusted-coverage-${randomUUID()}.json`)
+        : null;
+      if (trustedCoveragePath !== null) {
+        coverageArtifact = await precreateBoundArtifact(trustedCoveragePath);
+      }
+      if (reporterPath !== null && trustedCoveragePath !== null) {
+        await writeFile(
+          reporterPath,
+          trustedVitestReporterSource(
+            resultPath,
+            trustedCoveragePath,
+            reportNonce,
+            reportKey,
+          ),
+          { encoding: "utf8", flag: "wx", mode: 0o600 },
+        );
+      }
+      if (trustedConfigPath !== null) {
+        await writeFile(
+          trustedConfigPath,
+          "export default { test: { setupFiles: [] } };\n",
+          { encoding: "utf8", flag: "wx", mode: 0o600 },
+        );
+      }
       const outputState = { bytes: 0, exceeded: false };
       const outputTransform = () => ({
         binary: true as const,
@@ -189,6 +260,13 @@ export class LocalExecutionProvider implements ExecutionProvider {
         CI: "1",
         NPM_CONFIG_CACHE: temporaryCache,
         XDG_CACHE_HOME: temporaryCache,
+        // pnpm otherwise reconciles dependencies before `exec`. In a sandbox
+        // whose node_modules is a link to the host workspace, that check writes
+        // into the host tree from inside the execution boundary, and its cost
+        // grows with the workspace rather than with the snapshot under test.
+        // The dependencies are already installed and pinned by the lockfile
+        // hashed into the environment digest.
+        npm_config_verify_deps_before_run: "false",
       };
       const vitestCliPath = join(
         snapshotCopy,
@@ -205,11 +283,16 @@ export class LocalExecutionProvider implements ExecutionProvider {
           vitestCliPath,
           "run",
           `--root=${snapshotCopy}`,
-          "--reporter=json",
+          `--reporter=${reporterPath ?? "json"}`,
           `--outputFile=${resultPath}`,
+          ...(trustedConfigPath === null
+            ? []
+            : [`--config=${trustedConfigPath}`]),
           "--coverage.enabled",
           "--coverage.provider=v8",
           "--coverage.reporter=json",
+          "--coverage.reportOnFailure",
+          `--coverage.reportsDirectory=${coverageDirectory}`,
           ...requestedTestPaths,
         ],
         {
@@ -218,7 +301,7 @@ export class LocalExecutionProvider implements ExecutionProvider {
           maxBuffer: request.policy.maxOutputBytes,
           reject: false,
           extendEnv: false,
-          detached: process.platform !== "win32",
+          detached: true,
           cleanup: true,
           forceKillAfterDelay: 100,
           encoding: "buffer",
@@ -270,7 +353,10 @@ export class LocalExecutionProvider implements ExecutionProvider {
       }
 
       const remainingBytes = request.policy.maxOutputBytes - outputState.bytes;
-      const resultFile = await readFreshRegularFile(resultPath, remainingBytes);
+      const resultFile = await readBoundArtifact(
+        resultArtifact,
+        remainingBytes,
+      );
       if (resultFile.kind !== "ok") {
         return buildResult(request, runtime, startedAt, {
           terminalState:
@@ -281,11 +367,44 @@ export class LocalExecutionProvider implements ExecutionProvider {
         });
       }
 
-      const parsed = parseVitestResult(resultFile.content, {
+      const coverageBytes =
+        remainingBytes - Buffer.byteLength(resultFile.content);
+      const coverageFile =
+        coverageArtifact === null
+          ? await readFreshRegularFile(coveragePath, coverageBytes)
+          : await readBoundArtifact(coverageArtifact, coverageBytes);
+      if (coverageFile.kind !== "ok") {
+        return buildResult(request, runtime, startedAt, {
+          terminalState:
+            coverageFile.kind === "output-limit" ? "OUTPUT_LIMIT" : "FAILED",
+          exitCode: execution.exitCode,
+          stdout,
+          stderr: [stderr, `Fresh coverage artifact was ${coverageFile.kind}`]
+            .filter(Boolean)
+            .join("\n"),
+        });
+      }
+
+      const verifiedResult = useTrustedReporter
+        ? verifyTrustedVitestReport(resultFile.content, reportNonce, reportKey)
+        : resultFile.content;
+      if (verifiedResult === null) {
+        return buildResult(request, runtime, startedAt, {
+          terminalState: "FAILED",
+          exitCode: execution.exitCode,
+          stdout,
+          stderr: [stderr, "Trusted Vitest report authentication failed"]
+            .filter(Boolean)
+            .join("\n"),
+        });
+      }
+      const parsed = parseVitestResult(verifiedResult, {
         snapshotRoot: snapshotCopy,
         requestedTestPaths,
         generatedFiles: request.generatedFiles,
         allowedCoverage,
+        coverageArtifact: coverageFile.content,
+        exitCode: execution.exitCode,
       });
       const sanitizedParsed = sanitizeParsedResult(parsed, knownPaths);
       return buildResult(request, runtime, startedAt, {
@@ -317,11 +436,29 @@ export class LocalExecutionProvider implements ExecutionProvider {
       });
     } finally {
       await terminateProcessTree(childPid);
+      await resultArtifact?.handle.close();
+      await coverageArtifact?.handle.close();
       if (attemptRoot !== null) {
         await rm(attemptRoot, { recursive: true, force: true });
       }
     }
   }
+}
+
+function unsupportedRuntimeIdentity(): RuntimeIdentity {
+  const environmentDigest = createHash("sha256")
+    .update(
+      JSON.stringify({
+        platform: "win32",
+        runnerVersion: RUNNER_VERSION,
+      }),
+    )
+    .digest("hex");
+  return {
+    nodeVersion: "unsupported",
+    pnpmVersion: "unsupported",
+    environmentDigest,
+  };
 }
 
 interface BuildResultValues {
@@ -338,7 +475,8 @@ function buildResult(
   startedAt: number,
   values: BuildResultValues,
 ): ExecutionResult {
-  return {
+  const result = {
+    executionId: randomUUID(),
     revision: request.revision,
     snapshotSha: request.snapshotSha,
     terminalState: values.terminalState,
@@ -353,6 +491,7 @@ function buildResult(
     stderr: values.stderr,
     environmentDigest: runtime.environmentDigest,
   };
+  return { ...result, resultDigest: computeExecutionResultDigest(result) };
 }
 
 async function resolveSnapshotRoot(candidate: string): Promise<string> {
@@ -632,6 +771,73 @@ async function assertPrivateDependencyLinks(
   await visit(privateNodeModules);
 }
 
+interface BoundArtifact {
+  path: string;
+  handle: FileHandle;
+  device: number | bigint;
+  inode: number | bigint;
+}
+
+async function precreateBoundArtifact(path: string): Promise<BoundArtifact> {
+  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+  const handle = await open(
+    path,
+    fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_RDWR | noFollow,
+    0o600,
+  );
+  const info = await handle.stat();
+  if (!info.isFile()) {
+    await handle.close();
+    throw new Error("Control artifact is not a regular file");
+  }
+  return { path, handle, device: info.dev, inode: info.ino };
+}
+
+async function readBoundArtifact(
+  artifact: BoundArtifact,
+  maxBytes: number,
+): Promise<
+  | { kind: "ok"; content: string }
+  | { kind: "missing" }
+  | { kind: "output-limit" }
+> {
+  try {
+    const [descriptorInfo, pathInfo] = await Promise.all([
+      artifact.handle.stat(),
+      lstat(artifact.path),
+    ]);
+    if (
+      !descriptorInfo.isFile() ||
+      !pathInfo.isFile() ||
+      pathInfo.isSymbolicLink() ||
+      descriptorInfo.dev !== artifact.device ||
+      descriptorInfo.ino !== artifact.inode ||
+      pathInfo.dev !== artifact.device ||
+      pathInfo.ino !== artifact.inode
+    ) {
+      return { kind: "missing" };
+    }
+    if (descriptorInfo.size === 0) return { kind: "missing" };
+    if (descriptorInfo.size > maxBytes) return { kind: "output-limit" };
+    const content = Buffer.alloc(descriptorInfo.size);
+    const { bytesRead } = await artifact.handle.read(
+      content,
+      0,
+      descriptorInfo.size,
+      0,
+    );
+    if (bytesRead !== descriptorInfo.size) return { kind: "missing" };
+    return content.byteLength <= maxBytes
+      ? { kind: "ok", content: content.toString("utf8") }
+      : { kind: "output-limit" };
+  } catch (error) {
+    if (isNotFound(error) || isSymlinkOpenError(error)) {
+      return { kind: "missing" };
+    }
+    throw error;
+  }
+}
+
 async function readFreshRegularFile(
   path: string,
   maxBytes: number,
@@ -640,7 +846,7 @@ async function readFreshRegularFile(
   | { kind: "missing" }
   | { kind: "output-limit" }
 > {
-  let handle;
+  let handle: FileHandle | undefined;
   try {
     const noFollow = fsConstants.O_NOFOLLOW ?? 0;
     handle = await open(path, fsConstants.O_RDONLY | noFollow);
@@ -828,7 +1034,7 @@ function sanitizeOutput(
     (_whole, prefix: string, label: string) => `${prefix}${label}[REDACTED]`,
   );
   sanitized = sanitized.replace(
-    /(^|[\s("'=])((?:[A-Za-z]:[\\/]|\/)(?:[^\s:"'<>|]+[\\/])*[^\s:"'<>|]*)/gmu,
+    /(^|[\t (){}\[\]"'=,:;])(?:[A-Za-z]:[\\/]|\/)[^\r\n]*/gmu,
     (_whole, prefix: string) => `${prefix}<absolute-path>`,
   );
   return sanitized;

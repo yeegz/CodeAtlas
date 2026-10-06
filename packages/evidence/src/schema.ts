@@ -53,6 +53,25 @@ export const FindingStateSchema = z.enum([
   "ACCEPTED_CHANGE",
 ]);
 
+export const ConfidenceFactorSchema = z.union([
+  z.enum([
+    "DIFFERENTIAL_EXECUTION",
+    "EXACT_TEST_IDENTITY",
+    "EXACT_SYMBOL_PATH",
+    "MATCHING_ENVIRONMENT",
+    "CURRENT_EVIDENCE",
+    "INSUFFICIENT_EVIDENCE",
+  ]),
+  z.string().regex(/^REPEATABLE_[1-9][0-9]*_OF_[1-9][0-9]*$/),
+]);
+
+export const FindingConfidenceSchema = z
+  .strictObject({
+    level: z.enum(["HIGH", "MEDIUM", "LOW"]),
+    factors: z.array(ConfidenceFactorSchema).min(1).readonly(),
+  })
+  .readonly();
+
 export const SourceLocationSchema = z
   .strictObject({
     snapshotSha: z.string().regex(/^[0-9a-f]{40}$/),
@@ -110,6 +129,11 @@ export const ProofCardSchema = z.strictObject({
   limitations: z.array(z.string().min(1)),
 });
 
+const EvidenceFreeUnverifiedProofCardSchema = ProofCardSchema.extend({
+  evidenceIds: z.array(IdentifierSchema).length(0),
+  limitations: z.array(z.string().min(1)).min(1),
+});
+
 export const FindingEvidenceSchema = z.strictObject({
   id: IdentifierSchema,
   type: EvidenceTypeSchema,
@@ -129,10 +153,25 @@ export const FindingSchema = z
     state: FindingStateSchema,
     title: z.string().min(1),
     summary: z.string().min(1),
-    proofCard: ProofCardSchema,
+    graphPath: z.string().min(1).optional(),
+    confidence: FindingConfidenceSchema.optional(),
+    proofCard: z.union([
+      ProofCardSchema,
+      EvidenceFreeUnverifiedProofCardSchema,
+    ]),
     evidence: z.array(FindingEvidenceSchema),
   })
   .superRefine((finding, context) => {
+    if (
+      finding.proofCard.evidenceIds.length === 0 &&
+      finding.state !== "UNVERIFIED"
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["proofCard", "evidenceIds"],
+        message: "only unverified findings may omit evidence citations",
+      });
+    }
     const evidenceById = new Map(
       finding.evidence.map((evidence) => [evidence.id, evidence]),
     );
@@ -368,6 +407,8 @@ export const EvidenceManifestSchema = z
 export type EvidenceType = z.infer<typeof EvidenceTypeSchema>;
 export type GraphRelation = z.infer<typeof GraphRelationSchema>;
 export type FindingState = z.infer<typeof FindingStateSchema>;
+export type ConfidenceFactor = z.infer<typeof ConfidenceFactorSchema>;
+export type FindingConfidence = z.infer<typeof FindingConfidenceSchema>;
 export type SourceLocation = z.infer<typeof SourceLocationSchema>;
 export type EvidenceItem = z.infer<typeof EvidenceItemSchema>;
 export type GraphNode = z.infer<typeof GraphNodeSchema>;

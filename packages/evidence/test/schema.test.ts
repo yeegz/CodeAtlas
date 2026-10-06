@@ -27,6 +27,68 @@ const identityInput = {
 };
 
 describe("evidence provenance", () => {
+  it("round-trips optional graph path and qualitative confidence metadata", () => {
+    const finding = {
+      id: "finding_1",
+      state: "UNVERIFIED",
+      title: "Login behavior needs verification",
+      summary: "Authentication may have changed",
+      graphPath: "restoreSession → validateToken",
+      confidence: {
+        level: "LOW",
+        factors: ["EXACT_SYMBOL_PATH", "REPEATABLE_2_OF_2"],
+      },
+      proofCard,
+      evidence: [
+        {
+          id: "ev_1",
+          type: "AI_INFERENCE",
+          reproducibility: "NOT_REPRODUCIBLE",
+          baseSha: "a".repeat(40),
+          headSha: "b".repeat(40),
+          executions: { base: 0, head: 0 },
+        },
+      ],
+    };
+
+    const parsed = FindingSchema.parse(JSON.parse(JSON.stringify(finding)));
+
+    expect(parsed.graphPath).toBe("restoreSession → validateToken");
+    expect(parsed.confidence).toEqual(finding.confidence);
+  });
+
+  it("rejects numeric or malformed confidence metadata", () => {
+    const finding = {
+      id: "finding_1",
+      state: "UNVERIFIED",
+      title: "Login behavior needs verification",
+      summary: "Authentication may have changed",
+      graphPath: "restoreSession → validateToken",
+      proofCard,
+      evidence: [
+        {
+          id: "ev_1",
+          type: "AI_INFERENCE",
+          reproducibility: "NOT_REPRODUCIBLE",
+          baseSha: "a".repeat(40),
+          headSha: "b".repeat(40),
+          executions: { base: 0, head: 0 },
+        },
+      ],
+    };
+
+    expect(
+      FindingSchema.safeParse({ ...finding, confidence: { level: 0.91 } })
+        .success,
+    ).toBe(false);
+    expect(
+      FindingSchema.safeParse({
+        ...finding,
+        confidence: { level: "HIGH", factors: ["REPEATABLE_MANY"] },
+      }).success,
+    ).toBe(false);
+  });
+
   it("rejects a source citation without an immutable snapshot", () => {
     const result = EvidenceItemSchema.safeParse({
       id: "ev_1",

@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/analyzer/tsconfig.json" },
+    { "path": "../../packages/evidence/tsconfig.json" },
+    { "path": "../../packages/generator/tsconfig.json" },
+    { "path": "../../packages/passport/tsconfig.json" },
+    { "path": "../../packages/pipeline/tsconfig.json" },
+    { "path": "../../packages/runner/tsconfig.json" }
+  ]
+}
