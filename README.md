@@ -172,14 +172,6 @@ corepack enable
 pnpm install --frozen-lockfile
 ```
 
-Before [PR #5](https://github.com/yeegz/CodeAtlas/pull/5) merges, insert these
-commands after `cd CodeAtlas` to use the complete implementation:
-
-```bash
-git fetch origin pull/5/head
-git checkout --detach FETCH_HEAD
-```
-
 Node 25 and newer no longer bundle Corepack. If `corepack enable` is not
 available, install the pinned package manager directly:
 
@@ -263,9 +255,8 @@ The whole point of this project is that its claims can be checked.
 
 ## Repeatable setup and replay
 
-From this implementation checkout, `pnpm dev` opens the local workspace and
-`pnpm codeatlas --help` lists the CLI commands. For an unmerged implementation,
-use the pull-request checkout instructions above.
+From a checkout of `main`, `pnpm dev` opens the local workspace and
+`pnpm codeatlas --help` lists the CLI commands.
 
 Replay requires a usable Ed25519 public key in `evidence-manifest.sig`; missing
 verification material is rejected before snapshots or test processes are used.
