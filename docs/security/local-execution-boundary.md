@@ -50,8 +50,30 @@ contain a determined attacker.
   content address, the manifest digest and the manifest signature **before any
   test process is created**. A tampered bundle exits `5` having executed
   nothing.
+- Missing or unusable public-key material in `evidence-manifest.sig` is an
+  integrity failure. It cannot turn signature verification into an optional
+  step. Repeated analyses select the current bundle and matching signature;
+  explicit exports retain their own sidecars.
+- Artifact publication uses private temporary files and ownership-checked
+  cleanup. The writer holds the file open until cleanup finishes, so inode
+  reuse cannot cause a replacement file to be removed as its own temporary file.
 - The workspace refuses to render an analysis whose manifest does not verify,
   rather than displaying it with a warning.
+
+## Dependency maintenance
+
+Install the committed lockfile with `pnpm install --frozen-lockfile`. Run
+`pnpm audit` for the complete dependency graph and `pnpm audit --prod` for the
+production subset. The dated [verification record](../verification.md) records
+the latest checked revision and results; an audit result is specific to that
+lockfile and advisory database at the time of the check.
+
+The workspace pins compatible security fixes for transitive dependencies.
+The analyzer uses `tinyglobby` with a separate symlink-validation walk, and the
+unused Next.js ESLint configuration was removed, eliminating both paths to the
+unpatched `braces` dependency. Immutable fixture files retain their original
+bytes while a workspace override resolves their Vitest dependency to the patched
+version.
 
 ## Trust model of the local signing key
 

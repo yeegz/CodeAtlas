@@ -63,8 +63,10 @@ analysisId = "analysis_" + sha256(canonicalJson({
 
 The schema recomputes this and rejects a manifest whose `analysisId` does not
 match its own inputs. Per-attempt identifiers are deliberately absent from the
-canonical manifest, so re-running an identical analysis reproduces an identical
-digest and signature payload.
+canonical manifest. Identical normalized evidence, including observation
+timestamps, reproduces the same digest; using the same signing key reproduces
+the signature. The CLI supplies a new observation time and signing key for each
+run, so an unchanged analysis id does not imply an unchanged signed manifest.
 
 ## Canonicalisation and signing
 

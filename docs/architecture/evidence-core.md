@@ -50,14 +50,25 @@ evidence ── analyzer ── selector ─┐
 
 Every stored artifact is addressed by the SHA-256 digest of its canonical JSON
 and written with a temporary file plus a link, so a reader never observes a
-partial artifact.
+partial artifact. The temporary file stays open through ownership-checked
+cleanup, preventing inode reuse from making a substituted file look like the
+file this operation created.
 
 ## Determinism
 
 The analysis id is derived from provider, both snapshot digests, the
 configuration digest and the engine version. The same inputs always produce the
-same analysis id and the same signed manifest digest. Per-attempt identifiers
-exist outside the canonical manifest so a rerun does not change the signature.
+same analysis id. Canonical evidence with the same observation timestamps has
+the same manifest digest; the same signing key also produces the same signature.
+Per-attempt identifiers exist outside the canonical manifest. Ordinary CLI runs
+use the current time and a new signing key, so repeated analyses can share an
+analysis id while producing different signed manifests.
+
+The CLI retains content-addressed artifacts and publishes a current
+`reproduction-bundle.json` beside the matching signature. Finding-ID replay uses
+that bundle. For older run directories without a current pointer, it selects a
+bundle whose manifest digest matches the recorded signature envelope. Explicit
+exported bundle paths remain available for replaying older analyses.
 
 ## Replaceable boundaries
 

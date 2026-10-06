@@ -17,7 +17,7 @@
 
 ---
 
-[Implementation status](#what-is-actually-built) · [Setup](#setup) · [More work by Yousof](https://yousofselim.com)
+[Implementation status](#what-is-actually-built) · [Setup](#setup) · [Verification](docs/verification.md) · [More work by Yousof](https://yousofselim.com)
 
 ## The short version
 
@@ -166,11 +166,18 @@ You need Node.js 24.18 or newer (below 27) and pnpm 11.9.0, on macOS or Linux.
 Windows execution fails closed until a real process-tree boundary exists.
 
 ```bash
-git clone --branch codex/replay-completion https://github.com/yeegz/CodeAtlas.git
+git clone https://github.com/yeegz/CodeAtlas.git
 cd CodeAtlas
-git checkout codex/codeatlas-evidence-core
 corepack enable
 pnpm install --frozen-lockfile
+```
+
+Before [PR #5](https://github.com/yeegz/CodeAtlas/pull/5) merges, insert these
+commands after `cd CodeAtlas` to use the complete implementation:
+
+```bash
+git fetch origin pull/5/head
+git checkout --detach FETCH_HEAD
 ```
 
 Node 25 and newer no longer bundle Corepack. If `corepack enable` is not
@@ -192,6 +199,18 @@ browser acceptance suites, and a production build:
 ```bash
 pnpm verify
 ```
+
+Check the installed dependency graph separately:
+
+```bash
+pnpm audit
+pnpm audit --prod
+```
+
+`pnpm typecheck` generates Next.js route declarations before checking the
+workspace, so it also works on a fresh checkout without a prior web build.
+The [verification record](docs/verification.md) identifies the checked revision,
+local results, and the separate Linux CI gate.
 
 The complete suite can take more than thirty minutes: it executes fixture
 tests on both revisions in child processes and copies private dependencies.
@@ -230,6 +249,7 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 | [Architecture](docs/architecture/evidence-core.md)                                                 | Package graph, orchestration order, replaceable boundaries           |
 | [Local execution boundary](docs/security/local-execution-boundary.md)                              | What is and is not contained, and the trust model of the signing key |
 | [Evidence Manifest v1](docs/evidence-manifest-v1.md)                                               | Manifest fields, canonicalisation, and how to verify one yourself    |
+| [Verification record](docs/verification.md)                                                        | Release scope, local checks, dependency audits and CI evidence       |
 | [Product design](docs/superpowers/specs/2026-07-29-codeatlas-product-design.md)                    | The approved specification                                           |
 | [Implementation plan](docs/superpowers/plans/2026-07-29-codeatlas-evidence-core-vertical-slice.md) | The task-level plan this milestone followed                          |
 
@@ -244,8 +264,8 @@ The whole point of this project is that its claims can be checked.
 ## Repeatable setup and replay
 
 From this implementation checkout, `pnpm dev` opens the local workspace and
-`pnpm codeatlas --help` lists the CLI commands. The default branch still needs
-the implementation branch promoted before it provides this full project.
+`pnpm codeatlas --help` lists the CLI commands. For an unmerged implementation,
+use the pull-request checkout instructions above.
 
 Replay requires a usable Ed25519 public key in `evidence-manifest.sig`; missing
 verification material is rejected before snapshots or test processes are used.
